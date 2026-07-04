@@ -1,32 +1,80 @@
 """
 SpyBot — всё в одном файле.
-Установка: pip install aiogram aiosqlite telethon cryptography python-dotenv
-Запуск:    python bot.py
-
-Переменные окружения (или задай прямо здесь):
-  BOT_TOKEN              — токен от @BotFather
-  ADMIN_ID               — твой Telegram ID (узнай у @userinfobot)
-  API_ID                 — из my.telegram.org
-  API_HASH               — из my.telegram.org
-  SESSION_ENCRYPTION_KEY — сгенерировать:
-      python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+Запуск: python bot.py  (зависимости установятся автоматически)
 """
 
 # ══════════════════════════════════════════════════════════
-#  НАСТРОЙКИ — заполни здесь или через переменные окружения
+#  АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ
+#  При первом запуске скрипт сам установит нужные пакеты.
+# ══════════════════════════════════════════════════════════
+import subprocess, sys
+
+# Обязательные пакеты
+_REQUIRED = {
+    "aiogram":      "aiogram==3.13.1",
+    "aiosqlite":    "aiosqlite==0.20.0",
+    "telethon":     "telethon==1.36.0",
+    "cryptography": "cryptography==42.0.8",
+}
+# cryptg — опциональное ускорение Telethon, требует Rust-компилятор.
+# Если не установится — Telethon просто будет чуть медленнее, всё равно работает.
+_OPTIONAL = {"cryptg": "cryptg"}
+
+def _install_missing():
+    installed_ok = True
+    for mod, pkg in _REQUIRED.items():
+        try:
+            __import__(mod)
+        except ImportError:
+            print(f"[SpyBot] Устанавливаю {pkg}...")
+            r = subprocess.run(
+                [sys.executable, "-m", "pip", "install", pkg],
+                capture_output=True, text=True
+            )
+            if r.returncode != 0:
+                print(f"[SpyBot] ОШИБКА установки {pkg}: {r.stderr[-300:]}")
+                installed_ok = False
+            else:
+                print(f"[SpyBot] {pkg} — OK ✅")
+    for mod, pkg in _OPTIONAL.items():
+        try:
+            __import__(mod)
+        except ImportError:
+            print(f"[SpyBot] Устанавливаю опциональный {pkg}...")
+            r = subprocess.run(
+                [sys.executable, "-m", "pip", "install", pkg],
+                capture_output=True, text=True
+            )
+            if r.returncode != 0:
+                print(f"[SpyBot] {pkg} не установился (не критично, пропускаю)")
+            else:
+                print(f"[SpyBot] {pkg} — OK ✅")
+    return installed_ok
+
+if not _install_missing():
+    print("\n[SpyBot] Не все пакеты установились. Попробуй вручную:\n"
+          "  pip install aiogram aiosqlite telethon cryptography")
+    sys.exit(1)
+
+# ══════════════════════════════════════════════════════════
+#  ▼▼▼  НАСТРОЙКИ — ЗАПОЛНИ ЭТИ 4 СТРОКИ  ▼▼▼
 # ══════════════════════════════════════════════════════════
 import os
 
-BOT_TOKEN   = os.getenv("BOT_TOKEN",   "8989924852:AAFPev4Tva0mBjXMqIDlxLzmdrEEZCfCSR4")
-ADMIN_ID    = int(os.getenv("8769232009", "0"))   # твой Telegram ID
-API_ID      = int(os.getenv("API_ID",   "0"))   # my.telegram.org
-API_HASH    = os.getenv("API_HASH",     "")     # my.telegram.org
-SESSION_KEY = os.getenv("SESSION_ENCRYPTION_KEY", "")  # Fernet key
+BOT_TOKEN   = "8989924852:AAFPev4Tva0mBjXMqIDlxLzmdrEEZCfCSR4"   # ← @BotFather → /newbot → скопируй токен
+ADMIN_ID    =  8769232009         # ← твой Telegram ID (напиши @userinfobot — он ответит числом)
+API_ID      = 0          # ← my.telegram.org → API development tools → App api_id
+API_HASH    = ""         # ← my.telegram.org → API development tools → App api_hash
 
+# ── Остальное можно не трогать ────────────────────────────
+SESSION_KEY = os.getenv("SESSION_ENCRYPTION_KEY", "")  # авто-генерируется если пусто
 STARS_PRICE = 69    # цена подписки в Telegram Stars
 TRIAL_DAYS  = 10    # дней пробного периода
 SUB_DAYS    = 30    # дней платной подписки
-DB_PATH     = os.getenv("DB_PATH", "spybot.db")
+DB_PATH     = "spybot.db"   # файл базы данных (создастся автоматически)
+# ══════════════════════════════════════════════════════════
+#  ▲▲▲  ТОЛЬКО ЭТО НУЖНО ЗАПОЛНИТЬ  ▲▲▲
+# ══════════════════════════════════════════════════════════
 
 # ══════════════════════════════════════════════════════════
 #  ИМПОРТЫ
@@ -66,11 +114,15 @@ log = logging.getLogger(__name__)
 #  ШИФРОВАНИЕ СЕССИЙ
 # ══════════════════════════════════════════════════════════
 if not SESSION_KEY:
-    log.warning("SESSION_ENCRYPTION_KEY не задан — генерирую временный. "
-                "Задай постоянный ключ, иначе сессии сбросятся при перезапуске!\n"
-                "Сгенерировать: python -c \"from cryptography.fernet import Fernet; "
-                "print(Fernet.generate_key().decode())\"")
-    SESSION_KEY = Fernet.generate_key().decode()
+    _key_file = "session.key"
+    if os.path.exists(_key_file):
+        SESSION_KEY = open(_key_file).read().strip()
+        log.info("SESSION_ENCRYPTION_KEY загружен из session.key")
+    else:
+        SESSION_KEY = Fernet.generate_key().decode()
+        open(_key_file, "w").write(SESSION_KEY)
+        log.info("SESSION_ENCRYPTION_KEY сгенерирован и сохранён в session.key — "
+                 "не удаляй этот файл!")
 
 _fernet = Fernet(SESSION_KEY.encode())
 
@@ -416,6 +468,9 @@ class SessionManager:
 
     def is_connected(self, user_id: int) -> bool:
         return user_id in self._clients
+
+    def active_count(self) -> int:
+        return len(self._clients)
 
     # ── login ──────────────────────────────────────────────────────────────
 
@@ -897,7 +952,7 @@ async def cmd_admin(message: Message):
         f"📦 Кешировано: <b>{stats['cached']}</b>\n"
         f"✅ Подписок: <b>{stats['active_subs']}</b>\n"
         f"🎁 Триалов: <b>{stats['trials']}</b>\n"
-        f"📱 Юзерботов онлайн: <b>{len(sm._clients)}</b>"
+        f"📱 Юзерботов онлайн: <b>{sm.active_count()}</b>"
     )
 
 @router.message(Command("broadcast"), F.from_user.id == ADMIN_ID)
@@ -934,15 +989,23 @@ async def main():
     if API_ID and API_HASH:
         await sm.restore_all()
         tasks.append(asyncio.create_task(sm.run_forever()))
-        log.info("Session manager started")
+        log.info("Session manager запущен — перехват удалённых сообщений активен")
     else:
-        log.warning("API_ID/API_HASH не заданы — подключение аккаунтов недоступно")
+        log.info("ℹ️  API_ID/API_HASH не заданы — перехват УДАЛЁННЫХ сообщений отключён.\n"
+                 "    Изменённые сообщения и одноразовые медиа всё равно ловятся.\n"
+                 "    Чтобы включить перехват удалённых: заполни API_ID и API_HASH в bot.py\n"
+                 "    (получить на my.telegram.org → API development tools)")
 
     tasks.append(asyncio.create_task(
         dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     ))
 
-    log.info("SpyBot запущен!")
+    print("\n" + "="*50)
+    print("  ✅ SpyBot запущен!")
+    print(f"  📋 Режим: {'полный (удалённые + изменённые)' if API_ID and API_HASH else 'частичный (только изменённые)'}")
+    print(f"  🗄  База данных: {DB_PATH}")
+    print("  💬 Напиши боту /start в Telegram")
+    print("="*50 + "\n")
     try:
         await asyncio.gather(*tasks)
     finally:
@@ -950,6 +1013,22 @@ async def main():
         await bot.session.close()
 
 if __name__ == "__main__":
+    # ── Проверка настроек перед запуском ──────────────────────────────────
+    errors = []
+    if not BOT_TOKEN or "СЮДА" in BOT_TOKEN or "ТОКЕН" in BOT_TOKEN or len(BOT_TOKEN) < 20:
+        errors.append("  BOT_TOKEN  — токен от @BotFather (открой bot.py и замени ВСТАВЬ_ТОКЕН_БОТА)")
+    if not ADMIN_ID:
+        errors.append("  ADMIN_ID   — твой Telegram ID (узнай у @userinfobot)")
+    if errors:
+        print("\n" + "="*55)
+        print("  SpyBot: заполни настройки в начале файла bot.py!")
+        print("="*55)
+        for e in errors:
+            print(e)
+        print("="*55)
+        print("  Открой bot.py, найди строки BOT_TOKEN / ADMIN_ID")
+        print("  и замени значения на свои.\n")
+        sys.exit(0)
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
