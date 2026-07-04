@@ -720,7 +720,13 @@ async def cb_howto(call: CallbackQuery):
         "<b>Шаг 3.</b> Добавь бота в чат как администратора\n"
         "Настройки группы → Администраторы → @SpyBot\n\n"
         "<b>Шаг 4.</b> Сам состой в этом чате под своим аккаунтом\n\n"
-        "✅ Всё перехваченное придёт тебе в ЛС.",
+        "✅ Всё перехваченное придёт тебе в ЛС.\n\n"
+        "─────────────────────\n"
+        "🏢 <b>Режим Telegram Business (для лички)</b>\n"
+        "Нужен Telegram Premium. После активации:\n"
+        "• @BotFather → твой бот → Bot Settings → Business Mode\n"
+        "• Telegram → Настройки → Business → Чат-боты → добавь бота\n"
+        "✅ Бот начнёт ловить удалённые и изменённые в твоей личке!",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="📱 Подключить аккаунт", callback_data="my_account")],
             [InlineKeyboardButton(text="◀️ Назад",               callback_data="back_main")],
@@ -940,6 +946,95 @@ async def edited_message(message: Message):
         await notify_edited(message.bot, uid, title, sender, old_text, new_text)
     await db_cache_msg(message)
 
+
+
+# ══════════════════════════════════════════════════════════
+#  TELEGRAM BUSINESS API
+#  Ловит сообщения в ЛИЧКЕ владельца бизнес-аккаунта.
+#  Требует: Telegram Premium + включить в @BotFather →
+#           Bot Settings → Business Mode → Enable
+# ══════════════════════════════════════════════════════════
+
+# Хранилище: business_connection_id -> owner_user_id
+_business_connections: dict[str, int] = {}
+
+@router.business_connection()
+async def on_business_connection(update, bot: Bot):
+    """Пользователь подключил/отключил бота через Business."""
+    bc = update.business_connection
+    if bc.is_enabled:
+        _business_connections[bc.id] = bc.user.id
+        log.info(f"Business connection: user {bc.user.id} connected (@{bc.user.username})")
+        try:
+            await bot.send_message(
+                bc.user.id,
+                "✅ <b>Бизнес-подключение активно!</b>\n\n"
+                "Теперь я буду ловить в твоей личке:\n"
+                "🗑 Удалённые сообщения собеседников\n"
+                "✏️ Изменённые сообщения собеседников\n\n"
+                "Всё перехваченное приходит тебе сюда."
+            )
+        except Exception:
+            pass
+    else:
+        _business_connections.pop(bc.id, None)
+        log.info(f"Business connection: user {bc.user.id} disconnected")
+
+@router.business_message()
+async def on_business_message(message: Message):
+    """Кешируем входящие сообщения в личке бизнес-аккаунта."""
+    bc_id = message.business_connection_id
+    owner_id = _business_connections.get(bc_id)
+    if not owner_id:
+        return
+    if not await is_subscribed(owner_id):
+        return
+    # Кешируем под ID владельца как chat_id для единообразия
+    await db_cache_msg(message)
+
+@router.edited_business_message()
+async def on_edited_business_message(message: Message, bot: Bot):
+    """Собеседник изменил сообщение в личке владельца."""
+    bc_id = message.business_connection_id
+    owner_id = _business_connections.get(bc_id)
+    if not owner_id or not await is_subscribed(owner_id):
+        return
+
+    old = await db_get_cached(message.chat.id, message.message_id)
+    old_text = (old.get("text") or "[медиа]") if old else "[нет в кеше]"
+    new_text = message.text or message.caption or "[медиа]"
+    sender = message.from_user.full_name if message.from_user else "Аноним"
+    chat_title = f"Личка с {sender}"
+
+    await notify_edited(bot, owner_id, chat_title, sender, old_text, new_text)
+    await db_cache_msg(message)
+
+@router.deleted_business_messages()
+async def on_deleted_business_messages(event, bot: Bot):
+    """Собеседник удалил сообщения в личке владельца — это главная фича!"""
+    bc_id = event.business_connection_id
+    owner_id = _business_connections.get(bc_id)
+    if not owner_id or not await is_subscribed(owner_id):
+        return
+
+    chat_id = event.chat.id
+    for msg_id in event.message_ids:
+        cached = await db_get_cached(chat_id, msg_id)
+        if not cached:
+            # Сообщение не было закешировано (пришло до подключения бота)
+            try:
+                await bot.send_message(
+                    owner_id,
+                    f"🗑 <b>Удалено в личке</b>\n"
+                    f"💬 Чат: <b>{event.chat.first_name or event.chat.title or '?'}</b>\n"
+                    f"⚠️ Сообщение не удалось восстановить — оно было отправлено до подключения бота."
+                )
+            except Exception:
+                pass
+            continue
+        await notify_deleted(bot, owner_id, cached)
+        await db_del_cached(chat_id, msg_id)
+
 # ── админ ──────────────────────────────────────────────────────────────────
 
 @router.message(Command("admin"), F.from_user.id == ADMIN_ID)
@@ -986,6 +1081,10 @@ async def main():
 
     tasks = []
 
+    # Restore business connections from DB (в памяти не переживают рестарт,
+    # но пользователи переподключатся автоматически через бизнес-соединение)
+    log.info("Business API: готов принимать подключения через Telegram Business")
+
     if API_ID and API_HASH:
         await sm.restore_all()
         tasks.append(asyncio.create_task(sm.run_forever()))
@@ -997,7 +1096,7 @@ async def main():
                  "    (получить на my.telegram.org → API development tools)")
 
     tasks.append(asyncio.create_task(
-        dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types() + ["business_connection", "business_message", "edited_business_message", "deleted_business_messages"])
     ))
 
     print("\n" + "="*50)
