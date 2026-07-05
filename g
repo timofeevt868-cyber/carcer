@@ -1,77 +1,55 @@
 """
-SpyBot — всё в одном файле.
+SpyBot — ловит удалённые и изменённые сообщения через Telegram Business API.
 Запуск: python bot.py  (зависимости установятся автоматически)
+
+Как включить Business Mode:
+  1. @BotFather → твой бот → Bot Settings → Business Mode → Enable
+  2. Telegram → Настройки → Telegram Business → Чат-боты → добавь бота
 """
 
 # ══════════════════════════════════════════════════════════
 #  АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ
-#  При первом запуске скрипт сам установит нужные пакеты.
 # ══════════════════════════════════════════════════════════
 import subprocess, sys
 
-# Обязательные пакеты
 _REQUIRED = {
-    "aiogram":      "aiogram==3.13.1",
-    "aiosqlite":    "aiosqlite==0.20.0",
-    "telethon":     "telethon==1.36.0",
-    "cryptography": "cryptography==42.0.8",
+    "aiogram":   "aiogram==3.13.1",
+    "aiosqlite": "aiosqlite==0.20.0",
 }
-# cryptg — опциональное ускорение Telethon, требует Rust-компилятор.
-# Если не установится — Telethon просто будет чуть медленнее, всё равно работает.
-_OPTIONAL = {"cryptg": "cryptg"}
 
 def _install_missing():
-    installed_ok = True
+    ok = True
     for mod, pkg in _REQUIRED.items():
         try:
             __import__(mod)
         except ImportError:
             print(f"[SpyBot] Устанавливаю {pkg}...")
-            r = subprocess.run(
-                [sys.executable, "-m", "pip", "install", pkg],
-                capture_output=True, text=True
-            )
+            r = subprocess.run([sys.executable, "-m", "pip", "install", pkg],
+                               capture_output=True, text=True)
             if r.returncode != 0:
-                print(f"[SpyBot] ОШИБКА установки {pkg}: {r.stderr[-300:]}")
-                installed_ok = False
+                print(f"[SpyBot] ОШИБКА: {r.stderr[-300:]}")
+                ok = False
             else:
                 print(f"[SpyBot] {pkg} — OK ✅")
-    for mod, pkg in _OPTIONAL.items():
-        try:
-            __import__(mod)
-        except ImportError:
-            print(f"[SpyBot] Устанавливаю опциональный {pkg}...")
-            r = subprocess.run(
-                [sys.executable, "-m", "pip", "install", pkg],
-                capture_output=True, text=True
-            )
-            if r.returncode != 0:
-                print(f"[SpyBot] {pkg} не установился (не критично, пропускаю)")
-            else:
-                print(f"[SpyBot] {pkg} — OK ✅")
-    return installed_ok
+    return ok
 
 if not _install_missing():
-    print("\n[SpyBot] Не все пакеты установились. Попробуй вручную:\n"
-          "  pip install aiogram aiosqlite telethon cryptography")
+    print("\n[SpyBot] Установи вручную:\n  pip install aiogram aiosqlite")
     sys.exit(1)
 
 # ══════════════════════════════════════════════════════════
-#  ▼▼▼  НАСТРОЙКИ — ЗАПОЛНИ ЭТИ 4 СТРОКИ  ▼▼▼
+#  ▼▼▼  НАСТРОЙКИ — ЗАПОЛНИ ЭТИ 2 СТРОКИ  ▼▼▼
 # ══════════════════════════════════════════════════════════
 import os
 
-BOT_TOKEN   = "8989924852:AAFPev4Tva0mBjXMqIDlxLzmdrEEZCfCSR4"   # ← @BotFather → /newbot → скопируй токен
-ADMIN_ID    =  8769232009         # ← твой Telegram ID (напиши @userinfobot — он ответит числом)
-API_ID      = 0          # ← my.telegram.org → API development tools → App api_id
-API_HASH    = ""         # ← my.telegram.org → API development tools → App api_hash
+BOT_TOKEN = "8989924852:AAFPev4Tva0mBjXMqIDlxLzmdrEEZCfCSR4"  # ← @BotFather → /newbot → скопируй токен
+ADMIN_ID  = 8769232009   # ← твой Telegram ID (напиши @userinfobot — он ответит числом)
 
 # ── Остальное можно не трогать ────────────────────────────
-SESSION_KEY = os.getenv("SESSION_ENCRYPTION_KEY", "")  # авто-генерируется если пусто
 STARS_PRICE = 69    # цена подписки в Telegram Stars
 TRIAL_DAYS  = 10    # дней пробного периода
 SUB_DAYS    = 30    # дней платной подписки
-DB_PATH     = "spybot.db"   # файл базы данных (создастся автоматически)
+DB_PATH     = "spybot.db"
 # ══════════════════════════════════════════════════════════
 #  ▲▲▲  ТОЛЬКО ЭТО НУЖНО ЗАПОЛНИТЬ  ▲▲▲
 # ══════════════════════════════════════════════════════════
@@ -85,55 +63,21 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import aiosqlite
-from cryptography.fernet import Fernet, InvalidToken
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     Message, ChatMemberUpdated, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
     LabeledPrice, PreCheckoutQuery,
+    BusinessConnection, BusinessMessagesDeleted,
 )
 from aiogram.filters import CommandStart, Command, ChatMemberUpdatedFilter, KICKED, MEMBER
 
-from telethon import TelegramClient, events
-from telethon.sessions import StringSession
-from telethon.errors import (
-    SessionPasswordNeededError, PhoneCodeInvalidError,
-    PhoneCodeExpiredError, PhoneNumberInvalidError, FloodWaitError,
-)
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
-
-# ══════════════════════════════════════════════════════════
-#  ШИФРОВАНИЕ СЕССИЙ
-# ══════════════════════════════════════════════════════════
-if not SESSION_KEY:
-    _key_file = "session.key"
-    if os.path.exists(_key_file):
-        SESSION_KEY = open(_key_file).read().strip()
-        log.info("SESSION_ENCRYPTION_KEY загружен из session.key")
-    else:
-        SESSION_KEY = Fernet.generate_key().decode()
-        open(_key_file, "w").write(SESSION_KEY)
-        log.info("SESSION_ENCRYPTION_KEY сгенерирован и сохранён в session.key — "
-                 "не удаляй этот файл!")
-
-_fernet = Fernet(SESSION_KEY.encode())
-
-def enc(s: str) -> str:
-    return _fernet.encrypt(s.encode()).decode()
-
-def dec(s: str) -> Optional[str]:
-    try:
-        return _fernet.decrypt(s.encode()).decode()
-    except InvalidToken:
-        return None
 
 # ══════════════════════════════════════════════════════════
 #  БАЗА ДАННЫХ
@@ -154,17 +98,15 @@ async def db_init():
             sub_until   TIMESTAMP
         );
         CREATE TABLE IF NOT EXISTS chats (
-            chat_id     INTEGER PRIMARY KEY,
-            owner_id    INTEGER NOT NULL,
-            title       TEXT,
-            added_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            chat_id  INTEGER PRIMARY KEY,
+            owner_id INTEGER NOT NULL,
+            title    TEXT
         );
         CREATE TABLE IF NOT EXISTS message_cache (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             chat_id     INTEGER NOT NULL,
             message_id  INTEGER NOT NULL,
             chat_title  TEXT,
-            sender_id   INTEGER,
             sender_name TEXT,
             text        TEXT,
             media_type  TEXT,
@@ -173,34 +115,28 @@ async def db_init():
             cached_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(chat_id, message_id)
         );
-        CREATE TABLE IF NOT EXISTS user_sessions (
-            user_id      INTEGER PRIMARY KEY,
-            session_enc  TEXT,
-            phone        TEXT,
-            connected_at TIMESTAMP,
-            active       INTEGER DEFAULT 1
+        CREATE TABLE IF NOT EXISTS business_connections (
+            bc_id    TEXT PRIMARY KEY,
+            user_id  INTEGER NOT NULL,
+            phone    TEXT,
+            active   INTEGER DEFAULT 1
         );
     """)
     await _db.commit()
     log.info(f"Database ready: {DB_PATH}")
 
-def _parse_dt(val) -> Optional[datetime]:
-    if not val:
-        return None
-    if isinstance(val, datetime):
-        return val
-    try:
-        return datetime.fromisoformat(val)
-    except Exception:
-        return None
+def _dt(val) -> Optional[datetime]:
+    if not val: return None
+    if isinstance(val, datetime): return val
+    try: return datetime.fromisoformat(val)
+    except: return None
 
-# ── users ──────────────────────────────────────────────────────────────────
+# ── users ──────────────────────────────────────────────────
 
-async def db_get_or_create_user(user_id: int, name: str) -> dict:
+async def db_get_or_create(user_id: int, name: str) -> dict:
     async with _db.execute("SELECT * FROM users WHERE user_id=?", (user_id,)) as c:
         row = await c.fetchone()
-    if row:
-        return dict(row)
+    if row: return dict(row)
     await _db.execute("INSERT OR IGNORE INTO users(user_id,name) VALUES(?,?)", (user_id, name))
     await _db.commit()
     return {"user_id": user_id, "name": name, "trial_used": 0}
@@ -208,11 +144,10 @@ async def db_get_or_create_user(user_id: int, name: str) -> dict:
 async def db_get_user(user_id: int) -> Optional[dict]:
     async with _db.execute("SELECT * FROM users WHERE user_id=?", (user_id,)) as c:
         row = await c.fetchone()
-    if not row:
-        return None
+    if not row: return None
     d = dict(row)
-    d["trial_start"] = _parse_dt(d.get("trial_start"))
-    d["sub_until"]   = _parse_dt(d.get("sub_until"))
+    d["trial_start"] = _dt(d.get("trial_start"))
+    d["sub_until"]   = _dt(d.get("sub_until"))
     return d
 
 async def db_activate_trial(user_id: int):
@@ -224,16 +159,15 @@ async def db_set_sub(user_id: int, until: datetime):
     await _db.execute("UPDATE users SET sub_until=? WHERE user_id=?", (until, user_id))
     await _db.commit()
 
-async def db_all_user_ids() -> list[int]:
+async def db_all_ids() -> list[int]:
     async with _db.execute("SELECT user_id FROM users") as c:
         return [r[0] for r in await c.fetchall()]
 
-# ── chats ──────────────────────────────────────────────────────────────────
+# ── chats ──────────────────────────────────────────────────
 
 async def db_add_chat(owner_id: int, chat_id: int, title: str):
-    await _db.execute(
-        "INSERT OR REPLACE INTO chats(chat_id,owner_id,title) VALUES(?,?,?)",
-        (chat_id, owner_id, title))
+    await _db.execute("INSERT OR REPLACE INTO chats(chat_id,owner_id,title) VALUES(?,?,?)",
+                      (chat_id, owner_id, title))
     await _db.commit()
 
 async def db_remove_chat(chat_id: int):
@@ -248,32 +182,61 @@ async def db_chat_owners(chat_id: int) -> list[int]:
     async with _db.execute("SELECT owner_id FROM chats WHERE chat_id=?", (chat_id,)) as c:
         return [r[0] for r in await c.fetchall()]
 
-# ── message cache ──────────────────────────────────────────────────────────
+# ── business connections ───────────────────────────────────
 
-async def db_cache_msg(message: Message):
-    media_type = file_id = None
-    if message.photo:       media_type, file_id = "photo",      message.photo[-1].file_id
-    elif message.video:     media_type, file_id = "video",      message.video.file_id
-    elif message.audio:     media_type, file_id = "audio",      message.audio.file_id
-    elif message.document:  media_type, file_id = "document",   message.document.file_id
-    elif message.sticker:   media_type, file_id = "sticker",    message.sticker.file_id
-    elif message.voice:     media_type, file_id = "voice",      message.voice.file_id
-    elif message.video_note:media_type, file_id = "video_note", message.video_note.file_id
+async def db_save_bc(bc_id: str, user_id: int):
+    await _db.execute(
+        "INSERT OR REPLACE INTO business_connections(bc_id,user_id,active) VALUES(?,?,1)",
+        (bc_id, user_id))
+    await _db.commit()
 
+async def db_deactivate_bc(bc_id: str):
+    await _db.execute("UPDATE business_connections SET active=0 WHERE bc_id=?", (bc_id,))
+    await _db.commit()
+
+async def db_get_bc_owner(bc_id: str) -> Optional[int]:
+    async with _db.execute(
+        "SELECT user_id FROM business_connections WHERE bc_id=? AND active=1", (bc_id,)
+    ) as c:
+        row = await c.fetchone()
+    return row[0] if row else None
+
+async def db_get_user_bc(user_id: int) -> Optional[str]:
+    async with _db.execute(
+        "SELECT bc_id FROM business_connections WHERE user_id=? AND active=1", (user_id,)
+    ) as c:
+        row = await c.fetchone()
+    return row[0] if row else None
+
+async def db_all_bc_owners() -> list[int]:
+    async with _db.execute("SELECT DISTINCT user_id FROM business_connections WHERE active=1") as c:
+        return [r[0] for r in await c.fetchall()]
+
+# ── message cache ──────────────────────────────────────────
+
+async def db_cache(message: Message):
+    mt = fi = None
+    if message.photo:        mt, fi = "photo",      message.photo[-1].file_id
+    elif message.video:      mt, fi = "video",       message.video.file_id
+    elif message.audio:      mt, fi = "audio",       message.audio.file_id
+    elif message.document:   mt, fi = "document",    message.document.file_id
+    elif message.sticker:    mt, fi = "sticker",     message.sticker.file_id
+    elif message.voice:      mt, fi = "voice",       message.voice.file_id
+    elif message.video_note: mt, fi = "video_note",  message.video_note.file_id
+
+    sender = message.from_user.full_name if message.from_user else "Аноним"
+    title  = getattr(message.chat, "title", None) or \
+             getattr(message.chat, "first_name", None) or str(message.chat.id)
     try:
         await _db.execute(
             """INSERT OR REPLACE INTO message_cache
-               (chat_id,message_id,chat_title,sender_id,sender_name,text,media_type,file_id,date)
-               VALUES(?,?,?,?,?,?,?,?,?)""",
-            (message.chat.id, message.message_id,
-             message.chat.title or str(message.chat.id),
-             message.from_user.id if message.from_user else None,
-             message.from_user.full_name if message.from_user else "Аноним",
-             message.text or message.caption,
-             media_type, file_id, message.date))
+               (chat_id,message_id,chat_title,sender_name,text,media_type,file_id,date)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (message.chat.id, message.message_id, title, sender,
+             message.text or message.caption, mt, fi, message.date))
         await _db.commit()
     except Exception as e:
-        log.warning(f"cache_msg error: {e}")
+        log.warning(f"cache error: {e}")
     # чистка
     cutoff = datetime.utcnow() - timedelta(hours=48)
     await _db.execute("DELETE FROM message_cache WHERE chat_id=? AND cached_at<?",
@@ -289,10 +252,9 @@ async def db_get_cached(chat_id: int, msg_id: int) -> Optional[dict]:
         "SELECT * FROM message_cache WHERE chat_id=? AND message_id=?", (chat_id, msg_id)
     ) as c:
         row = await c.fetchone()
-    if not row:
-        return None
+    if not row: return None
     d = dict(row)
-    d["date"] = _parse_dt(d.get("date")) or datetime.utcnow()
+    d["date"] = _dt(d.get("date")) or datetime.utcnow()
     return d
 
 async def db_del_cached(chat_id: int, msg_id: int):
@@ -300,48 +262,20 @@ async def db_del_cached(chat_id: int, msg_id: int):
         "DELETE FROM message_cache WHERE chat_id=? AND message_id=?", (chat_id, msg_id))
     await _db.commit()
 
-# ── sessions ───────────────────────────────────────────────────────────────
-
-async def db_save_session(user_id: int, session_enc: str, phone: str):
-    await _db.execute(
-        """INSERT INTO user_sessions(user_id,session_enc,phone,connected_at,active)
-           VALUES(?,?,?,?,1)
-           ON CONFLICT(user_id) DO UPDATE SET
-               session_enc=excluded.session_enc, phone=excluded.phone,
-               connected_at=excluded.connected_at, active=1""",
-        (user_id, session_enc, phone, datetime.utcnow()))
-    await _db.commit()
-
-async def db_get_session(user_id: int) -> Optional[dict]:
-    async with _db.execute(
-        "SELECT * FROM user_sessions WHERE user_id=? AND active=1", (user_id,)
-    ) as c:
-        row = await c.fetchone()
-    return dict(row) if row else None
-
-async def db_all_sessions() -> list[dict]:
-    async with _db.execute("SELECT * FROM user_sessions WHERE active=1") as c:
-        return [dict(r) for r in await c.fetchall()]
-
-async def db_deactivate_session(user_id: int):
-    await _db.execute("UPDATE user_sessions SET active=0 WHERE user_id=?", (user_id,))
-    await _db.commit()
-
-# ── stats ──────────────────────────────────────────────────────────────────
+# ── stats ──────────────────────────────────────────────────
 
 async def db_stats() -> dict:
     now = datetime.utcnow()
-    trial_cutoff = now - timedelta(days=TRIAL_DAYS)
     async def one(q, *a):
-        async with _db.execute(q, a) as c:
-            return (await c.fetchone())[0]
+        async with _db.execute(q, a) as c: return (await c.fetchone())[0]
     return {
-        "users":       await one("SELECT COUNT(*) FROM users"),
-        "chats":       await one("SELECT COUNT(*) FROM chats"),
-        "cached":      await one("SELECT COUNT(*) FROM message_cache"),
-        "active_subs": await one("SELECT COUNT(*) FROM users WHERE sub_until>?", now),
-        "trials":      await one(
-            "SELECT COUNT(*) FROM users WHERE trial_start>? AND sub_until IS NULL", trial_cutoff),
+        "users":    await one("SELECT COUNT(*) FROM users"),
+        "chats":    await one("SELECT COUNT(*) FROM chats"),
+        "cached":   await one("SELECT COUNT(*) FROM message_cache"),
+        "subs":     await one("SELECT COUNT(*) FROM users WHERE sub_until>?", now),
+        "trials":   await one("SELECT COUNT(*) FROM users WHERE trial_start>? AND sub_until IS NULL",
+                              now - timedelta(days=TRIAL_DAYS)),
+        "business": await one("SELECT COUNT(*) FROM business_connections WHERE active=1"),
     }
 
 # ══════════════════════════════════════════════════════════
@@ -349,13 +283,12 @@ async def db_stats() -> dict:
 # ══════════════════════════════════════════════════════════
 
 async def is_subscribed(user_id: int) -> bool:
-    user = await db_get_user(user_id)
-    if not user:
-        return False
-    if user.get("sub_until"):
-        return datetime.utcnow() < user["sub_until"]
-    if user.get("trial_start"):
-        return datetime.utcnow() < user["trial_start"] + timedelta(days=TRIAL_DAYS)
+    u = await db_get_user(user_id)
+    if not u: return False
+    if u.get("sub_until"):
+        return datetime.utcnow() < u["sub_until"]
+    if u.get("trial_start"):
+        return datetime.utcnow() < u["trial_start"] + timedelta(days=TRIAL_DAYS)
     return False
 
 async def active_owners(chat_id: int) -> list[int]:
@@ -367,10 +300,9 @@ async def active_owners(chat_id: int) -> list[int]:
 
 def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Мои чаты",            callback_data="my_chats")],
-        [InlineKeyboardButton(text="👤 Профиль / Подписка",  callback_data="profile")],
-        [InlineKeyboardButton(text="📱 Мой аккаунт",         callback_data="my_account")],
-        [InlineKeyboardButton(text="❓ Как это работает",     callback_data="howto")],
+        [InlineKeyboardButton(text="📋 Мои чаты",           callback_data="my_chats")],
+        [InlineKeyboardButton(text="👤 Профиль / Подписка", callback_data="profile")],
+        [InlineKeyboardButton(text="❓ Как это работает",    callback_data="howto")],
     ])
 
 def kb_sub() -> InlineKeyboardMarkup:
@@ -384,22 +316,6 @@ def kb_back() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")]
     ])
 
-def kb_cancel() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_connect")]
-    ])
-
-def kb_account(connected: bool) -> InlineKeyboardMarkup:
-    btn = (
-        InlineKeyboardButton(text="🔴 Отключить аккаунт",         callback_data="disconnect_account")
-        if connected else
-        InlineKeyboardButton(text="🔗 Подключить Telegram-аккаунт", callback_data="connect_account")
-    )
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [btn],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")],
-    ])
-
 # ══════════════════════════════════════════════════════════
 #  УВЕДОМЛЕНИЯ
 # ══════════════════════════════════════════════════════════
@@ -409,17 +325,17 @@ async def notify_deleted(bot: Bot, user_id: int, cached: dict):
     header = (
         f"🗑 <b>Удалённое сообщение</b>\n"
         f"💬 Чат: <b>{cached.get('chat_title','?')}</b>\n"
-        f"👤 Отправитель: <b>{cached.get('sender_name','Аноним')}</b>\n"
-        f"🕐 Время: {date_str}\n"
+        f"👤 От: <b>{cached.get('sender_name','Аноним')}</b>\n"
+        f"🕐 {date_str}\n"
     )
     try:
         if cached.get("text"):
             await bot.send_message(user_id, header + f"\n📝 Текст:\n{cached['text']}")
         elif cached.get("file_id"):
             await bot.send_message(user_id, header + f"\n📎 Тип: {cached.get('media_type')}")
-            await resend_media(bot, user_id, cached.get("media_type"), cached["file_id"])
+            await resend_media(bot, user_id, cached["media_type"], cached["file_id"])
         else:
-            await bot.send_message(user_id, header + "\n[медиа без текста]")
+            await bot.send_message(user_id, header + "\n[медиа]")
     except Exception as e:
         log.warning(f"notify_deleted failed for {user_id}: {e}")
 
@@ -430,7 +346,7 @@ async def notify_edited(bot: Bot, user_id: int, chat_title: str,
             f"✏️ <b>Изменённое сообщение</b>\n"
             f"💬 Чат: <b>{chat_title}</b>\n"
             f"👤 Автор: <b>{sender}</b>\n"
-            f"🕐 Время: {datetime.utcnow().strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"🕐 {datetime.utcnow().strftime('%d.%m.%Y %H:%M')}\n\n"
             f"📝 <b>Было:</b>\n{old_text}\n\n"
             f"📝 <b>Стало:</b>\n{new_text}"
         )
@@ -445,185 +361,7 @@ async def resend_media(bot: Bot, user_id: int, media_type: str, file_id: str):
         if media_type in m:
             await m[media_type](user_id, file_id)
     except Exception as e:
-        log.warning(f"resend_media failed: {e}")
-
-# ══════════════════════════════════════════════════════════
-#  МЕНЕДЖЕР ПОЛЬЗОВАТЕЛЬСКИХ СЕССИЙ (Telethon)
-# ══════════════════════════════════════════════════════════
-
-class _LoginSession:
-    def __init__(self, client: TelegramClient, phone: str):
-        self.client = client
-        self.phone  = phone
-        self.phone_code_hash: Optional[str] = None
-
-class SessionManager:
-    def __init__(self):
-        self._clients: dict[int, TelegramClient] = {}
-        self._pending: dict[int, _LoginSession]  = {}
-        self._bot: Optional[Bot] = None
-
-    def set_bot(self, bot: Bot):
-        self._bot = bot
-
-    def is_connected(self, user_id: int) -> bool:
-        return user_id in self._clients
-
-    def active_count(self) -> int:
-        return len(self._clients)
-
-    # ── login ──────────────────────────────────────────────────────────────
-
-    async def start_login(self, user_id: int, phone: str) -> tuple[bool, str]:
-        if not API_ID or not API_HASH:
-            return False, "⚠️ Сервис не настроен (нет API_ID/API_HASH). Обратись к администратору."
-        client = TelegramClient(StringSession(), API_ID, API_HASH)
-        try:
-            await client.connect()
-            sent = await client.send_code_request(phone)
-        except PhoneNumberInvalidError:
-            await client.disconnect()
-            return False, "❌ Неверный формат номера. Пример: +79991234567"
-        except FloodWaitError as e:
-            await client.disconnect()
-            return False, f"⏳ Слишком много попыток. Подожди {e.seconds} сек."
-        except Exception as e:
-            await client.disconnect()
-            return False, f"❌ Не удалось отправить код: {e}"
-        ls = _LoginSession(client, phone)
-        ls.phone_code_hash = sent.phone_code_hash
-        self._pending[user_id] = ls
-        return True, "📲 Код отправлен!"
-
-    async def submit_code(self, user_id: int, code: str) -> tuple[bool, str, bool]:
-        """(успех, сообщение, нужен_2FA)"""
-        ls = self._pending.get(user_id)
-        if not ls:
-            return False, "❌ Сессия не найдена, начни заново.", False
-        try:
-            await ls.client.sign_in(phone=ls.phone, code=code,
-                                    phone_code_hash=ls.phone_code_hash)
-        except SessionPasswordNeededError:
-            return False, "🔐 Включена 2FA. Введи пароль:", True
-        except (PhoneCodeInvalidError, PhoneCodeExpiredError):
-            return False, "❌ Неверный или устаревший код.", False
-        except Exception as e:
-            return False, f"❌ Ошибка: {e}", False
-        ok, msg = await self._finalize(user_id, ls)
-        return ok, msg, False
-
-    async def submit_2fa(self, user_id: int, password: str) -> tuple[bool, str]:
-        ls = self._pending.get(user_id)
-        if not ls:
-            return False, "❌ Сессия не найдена, начни заново."
-        try:
-            await ls.client.sign_in(password=password)
-        except Exception as e:
-            return False, f"❌ Неверный пароль 2FA: {e}"
-        return await self._finalize(user_id, ls)
-
-    async def _finalize(self, user_id: int, ls: _LoginSession) -> tuple[bool, str]:
-        me = await ls.client.get_me()
-        encrypted = enc(ls.client.session.save())
-        await db_save_session(user_id, encrypted, ls.phone)
-        del self._pending[user_id]
-        self._clients[user_id] = ls.client
-        self._register(user_id, ls.client)
-        log.info(f"User {user_id} connected account @{me.username or me.id}")
-        return True, f"✅ Аккаунт @{me.username or me.first_name} подключён!\nТеперь ловлю удалённые сообщения в твоих чатах."
-
-    def cancel_login(self, user_id: int):
-        ls = self._pending.pop(user_id, None)
-        if ls:
-            asyncio.create_task(ls.client.disconnect())
-
-    # ── lifecycle ──────────────────────────────────────────────────────────
-
-    async def restore_all(self):
-        if not API_ID or not API_HASH:
-            return
-        rows = await db_all_sessions()
-        for row in rows:
-            uid = row["user_id"]
-            decrypted = dec(row["session_enc"])
-            if not decrypted:
-                log.warning(f"Cannot decrypt session for user {uid}")
-                continue
-            try:
-                client = TelegramClient(StringSession(decrypted), API_ID, API_HASH)
-                await client.connect()
-                if not await client.is_user_authorized():
-                    log.warning(f"Session for user {uid} expired")
-                    await db_deactivate_session(uid)
-                    await client.disconnect()
-                    continue
-                self._clients[uid] = client
-                self._register(uid, client)
-                log.info(f"Restored session for user {uid}")
-            except Exception as e:
-                log.warning(f"Failed to restore session for {uid}: {e}")
-        log.info(f"Restored {len(self._clients)} session(s)")
-
-    async def disconnect_user(self, user_id: int):
-        client = self._clients.pop(user_id, None)
-        if client:
-            await client.disconnect()
-        await db_deactivate_session(user_id)
-
-    async def shutdown(self):
-        for c in self._clients.values():
-            try:
-                await c.disconnect()
-            except Exception:
-                pass
-
-    async def run_forever(self):
-        """Держит клиенты живыми — переподключает раз в час."""
-        while True:
-            await asyncio.sleep(3600)
-            for uid, client in list(self._clients.items()):
-                if not client.is_connected():
-                    try:
-                        await client.connect()
-                        log.info(f"Reconnected session for user {uid}")
-                    except Exception as e:
-                        log.warning(f"Reconnect failed for {uid}: {e}")
-
-    # ── event handler ──────────────────────────────────────────────────────
-
-    def _register(self, user_id: int, client: TelegramClient):
-        bot = self._bot
-
-        @client.on(events.MessageDeleted())
-        async def on_deleted(event: events.MessageDeleted.Event):
-            chat_id = event.chat_id
-            if chat_id is None:
-                return
-            # Telethon и Bot API могут по-разному кодировать chat_id
-            candidates = {chat_id, -chat_id, -1000000000000 - chat_id} if chat_id > 0 else {chat_id}
-            for cid in candidates:
-                owners = await db_chat_owners(cid)
-                if user_id not in owners:
-                    continue
-                if not await is_subscribed(user_id):
-                    continue
-                for msg_id in event.deleted_ids:
-                    cached = await db_get_cached(cid, msg_id)
-                    if not cached:
-                        continue
-                    await notify_deleted(bot, user_id, cached)
-                    await db_del_cached(cid, msg_id)
-
-sm = SessionManager()
-
-# ══════════════════════════════════════════════════════════
-#  FSM STATES
-# ══════════════════════════════════════════════════════════
-
-class ConnectAccount(StatesGroup):
-    waiting_phone = State()
-    waiting_code  = State()
-    waiting_2fa   = State()
+        log.warning(f"resend_media: {e}")
 
 # ══════════════════════════════════════════════════════════
 #  РОУТЕР / ХЕНДЛЕРЫ
@@ -631,106 +369,100 @@ class ConnectAccount(StatesGroup):
 
 router = Router(name="spybot")
 
-# ── /start ─────────────────────────────────────────────────────────────────
+# ── /start ─────────────────────────────────────────────────
 
 @router.message(CommandStart())
 async def cmd_start(message: Message):
-    await db_get_or_create_user(message.from_user.id, message.from_user.full_name)
+    await db_get_or_create(message.from_user.id, message.from_user.full_name)
     active = await is_subscribed(message.from_user.id)
     if active:
+        bc = await db_get_user_bc(message.from_user.id)
+        bc_status = "🟢 Business подключён — ловлю личку" if bc else "🔴 Business не подключён"
         await message.answer(
             f"👋 Привет, <b>{message.from_user.first_name}</b>!\n\n"
-            "🤖 <b>SpyBot</b> активен. Что умеет:\n"
-            "🗑 Ловит <b>удалённые</b> сообщения\n"
-            "✏️ Ловит <b>изменённые</b> сообщения\n"
-            "🔥 Перехватывает <b>одноразовые</b> медиа\n\n"
-            "Все перехваченные сообщения приходят тебе в ЛС.",
+            "🤖 <b>SpyBot</b> активен.\n\n"
+            "Что ловлю:\n"
+            "🗑 Удалённые сообщения\n"
+            "✏️ Изменённые сообщения\n\n"
+            f"Статус: {bc_status}",
             reply_markup=kb_main()
         )
     else:
         await message.answer(
             f"👋 Привет, <b>{message.from_user.first_name}</b>!\n\n"
-            "🤖 <b>SpyBot</b> — детектив в Telegram.\n\n"
-            "🗑 Ловит удалённые сообщения\n"
-            "✏️ Ловит изменённые (до/после)\n"
-            "🔥 Перехватывает одноразовые фото/видео\n\n"
+            "🤖 <b>SpyBot</b> — ловит удалённые и изменённые сообщения через Telegram Business.\n\n"
+            "✅ Работает в личке (нужен Telegram Premium)\n"
+            "✅ Работает в группах\n\n"
             f"💰 <b>{STARS_PRICE} ⭐ Stars</b> / месяц\n"
             f"🎁 Пробный период: <b>{TRIAL_DAYS} дней бесплатно</b>",
             reply_markup=kb_sub()
         )
 
-# ── профиль ────────────────────────────────────────────────────────────────
+# ── профиль ────────────────────────────────────────────────
 
 @router.callback_query(F.data == "profile")
 async def cb_profile(call: CallbackQuery):
     user = await db_get_user(call.from_user.id)
     if not user:
-        await call.answer("Сначала используй /start", show_alert=True)
-        return
+        await call.answer("Сначала /start", show_alert=True); return
     active = await is_subscribed(call.from_user.id)
     chats  = await db_user_chats(call.from_user.id)
+    bc     = await db_get_user_bc(call.from_user.id)
+
     if active:
         if user.get("sub_until"):
             status = f"✅ Подписка до <b>{user['sub_until'].strftime('%d.%m.%Y')}</b>"
         else:
             end  = user["trial_start"] + timedelta(days=TRIAL_DAYS)
             left = max((end - datetime.utcnow()).days, 0)
-            status = f"🎁 Пробный до <b>{end.strftime('%d.%m.%Y')}</b> (осталось {left} дн.)"
+            status = f"🎁 Пробный до <b>{end.strftime('%d.%m.%Y')}</b> ({left} дн.)"
     else:
         status = "❌ Подписка не активна"
-    acc = "🟢 Подключён" if sm.is_connected(call.from_user.id) else "🔴 Не подключён"
+
+    bc_status = "🟢 Подключён (личка ловится)" if bc else "🔴 Не подключён"
+
     await call.message.edit_text(
         f"👤 <b>Профиль</b>\n\n"
         f"ID: <code>{call.from_user.id}</code>\n"
-        f"Имя: {call.from_user.full_name}\n"
         f"Статус: {status}\n"
-        f"Чатов: <b>{len(chats)}</b>\n"
-        f"Аккаунт (перехват удалённых): {acc}",
+        f"Групп отслеживается: <b>{len(chats)}</b>\n"
+        f"Telegram Business: {bc_status}",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"⭐ Продлить — {STARS_PRICE} Stars", callback_data="buy_sub")],
-            [InlineKeyboardButton(text="📱 Мой аккаунт", callback_data="my_account")],
-            [InlineKeyboardButton(text="◀️ Назад",        callback_data="back_main")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")],
         ])
     )
     await call.answer()
 
-# ── мои чаты ───────────────────────────────────────────────────────────────
+# ── мои чаты ───────────────────────────────────────────────
 
 @router.callback_query(F.data == "my_chats")
 async def cb_my_chats(call: CallbackQuery):
     chats = await db_user_chats(call.from_user.id)
     if not chats:
-        text = "📋 <b>Мои чаты</b>\n\nПока нет отслеживаемых чатов.\nДобавь бота в чат как администратора!"
+        text = "📋 <b>Мои группы</b>\n\nПока нет отслеживаемых групп.\nДобавь бота в группу как администратора!"
     else:
         lines = "\n".join(f"• {c['title']} (<code>{c['chat_id']}</code>)" for c in chats)
-        text = f"📋 <b>Мои чаты</b> ({len(chats)}):\n\n{lines}"
+        text = f"📋 <b>Мои группы</b> ({len(chats)}):\n\n{lines}"
     await call.message.edit_text(text, reply_markup=kb_back())
     await call.answer()
 
-# ── как это работает ───────────────────────────────────────────────────────
+# ── как это работает ───────────────────────────────────────
 
 @router.callback_query(F.data == "howto")
 async def cb_howto(call: CallbackQuery):
     await call.message.edit_text(
         "❓ <b>Как использовать SpyBot</b>\n\n"
-        "<b>Шаг 1.</b> Активируй подписку или пробный период\n\n"
-        "<b>Шаг 2.</b> Подключи свой Telegram-аккаунт\n"
-        "📱 Мой аккаунт → Подключить → введи номер и код\n"
-        "Это нужно чтобы ловить <b>удалённые</b> сообщения\n\n"
-        "<b>Шаг 3.</b> Добавь бота в чат как администратора\n"
-        "Настройки группы → Администраторы → @SpyBot\n\n"
-        "<b>Шаг 4.</b> Сам состой в этом чате под своим аккаунтом\n\n"
-        "✅ Всё перехваченное придёт тебе в ЛС.\n\n"
-        "─────────────────────\n"
-        "🏢 <b>Режим Telegram Business (для лички)</b>\n"
-        "Нужен Telegram Premium. После активации:\n"
-        "• @BotFather → твой бот → Bot Settings → Business Mode\n"
-        "• Telegram → Настройки → Business → Чат-боты → добавь бота\n"
-        "✅ Бот начнёт ловить удалённые и изменённые в твоей личке!",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📱 Подключить аккаунт", callback_data="my_account")],
-            [InlineKeyboardButton(text="◀️ Назад",               callback_data="back_main")],
-        ])
+        "<b>── Личная переписка ──</b>\n"
+        "Нужен Telegram Premium\n\n"
+        "<b>Шаг 1.</b> Включи Business Mode в боте:\n"
+        "@BotFather → твой бот → Bot Settings → Business Mode → Enable\n\n"
+        "<b>Шаг 2.</b> Подключи бота в Telegram:\n"
+        "Настройки → Telegram Business → Чат-боты → введи @username бота\n\n"
+        "✅ Готово! Бот начнёт ловить удалённые и изменённые в твоей личке.\n\n"
+        "<b>── Группы ──</b>\n"
+        "Добавь бота в группу как администратора — и он будет ловить там.",
+        reply_markup=kb_back()
     )
     await call.answer()
 
@@ -739,37 +471,34 @@ async def cb_back(call: CallbackQuery):
     await call.message.edit_text("🏠 <b>Главное меню</b>", reply_markup=kb_main())
     await call.answer()
 
-# ── триал ──────────────────────────────────────────────────────────────────
+# ── триал ──────────────────────────────────────────────────
 
 @router.callback_query(F.data == "trial")
 async def cb_trial(call: CallbackQuery):
     user = await db_get_user(call.from_user.id)
     if not user:
-        await db_get_or_create_user(call.from_user.id, call.from_user.full_name)
+        await db_get_or_create(call.from_user.id, call.from_user.full_name)
         user = await db_get_user(call.from_user.id)
     if user.get("trial_used"):
-        await call.answer("❌ Пробный период уже использован!", show_alert=True)
-        return
+        await call.answer("❌ Пробный период уже использован!", show_alert=True); return
     await db_activate_trial(call.from_user.id)
     end = (datetime.utcnow() + timedelta(days=TRIAL_DAYS)).strftime("%d.%m.%Y")
     await call.message.edit_text(
         f"🎉 <b>Пробный период активирован!</b>\n\nДо: <b>{end}</b>\n\n"
-        "Теперь подключи свой аккаунт для перехвата удалённых:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📱 Подключить аккаунт", callback_data="my_account")],
-            [InlineKeyboardButton(text="🏠 Главное меню",        callback_data="back_main")],
-        ])
+        "Теперь подключи бота через Telegram Business чтобы ловить сообщения в личке!\n"
+        "Инструкция: кнопка ❓ в главном меню.",
+        reply_markup=kb_main()
     )
     await call.answer("✅ Активировано!")
 
-# ── оплата Stars ───────────────────────────────────────────────────────────
+# ── оплата ─────────────────────────────────────────────────
 
 @router.callback_query(F.data == "buy_sub")
 async def cb_buy(call: CallbackQuery, bot: Bot):
     await bot.send_invoice(
         chat_id=call.from_user.id,
         title=f"⭐ Подписка SpyBot — {SUB_DAYS} дней",
-        description=f"Перехват удалённых, изменённых и одноразовых сообщений на {SUB_DAYS} дней.",
+        description=f"Перехват удалённых и изменённых сообщений на {SUB_DAYS} дней.",
         payload="sub_period",
         currency="XTR",
         prices=[LabeledPrice(label=f"Подписка {SUB_DAYS} дней", amount=STARS_PRICE)],
@@ -785,102 +514,104 @@ async def pre_checkout(pcq: PreCheckoutQuery):
 async def payment_done(message: Message):
     until = datetime.utcnow() + timedelta(days=SUB_DAYS)
     await db_set_sub(message.from_user.id, until)
-    connected = sm.is_connected(message.from_user.id)
-    extra = "\n\n📱 Подключи аккаунт для перехвата удалённых!" if not connected else ""
     await message.answer(
-        f"✅ <b>Подписка активирована!</b>\nДо: <b>{until.strftime('%d.%m.%Y')}</b>{extra}",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📱 Подключить аккаунт", callback_data="my_account")],
-            [InlineKeyboardButton(text="🏠 Главное меню",        callback_data="back_main")],
-        ]) if not connected else kb_main()
+        f"✅ <b>Подписка активирована!</b>\nДо: <b>{until.strftime('%d.%m.%Y')}</b>\n\n"
+        "Подключи бота через Telegram Business чтобы ловить личку — инструкция в меню ❓",
+        reply_markup=kb_main()
     )
     log.info(f"Payment OK: user={message.from_user.id} until={until}")
 
-# ── подключение аккаунта (FSM) ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════
+#  TELEGRAM BUSINESS API — ЛИЧКА
+# ══════════════════════════════════════════════════════════
 
-@router.callback_query(F.data == "my_account")
-async def cb_my_account(call: CallbackQuery):
-    connected = sm.is_connected(call.from_user.id)
-    sess  = await db_get_session(call.from_user.id)
-    phone = sess["phone"] if sess else None
-    await call.message.edit_text(
-        "📱 <b>Мой Telegram-аккаунт</b>\n\n"
-        f"Статус: {'🟢 Подключён' if connected else '🔴 Не подключён'}\n"
-        + (f"Номер: <code>{phone}</code>\n" if phone else "")
-        + "\nПодключи аккаунт — и бот начнёт ловить <b>удалённые сообщения</b> в твоих чатах.\n\n"
-        "⚠️ Бот получает доступ только к списку удалённых сообщений в чатах, где ты состоишь. "
-        "Пароли и личная переписка не передаются.",
-        reply_markup=kb_account(connected)
-    )
-    await call.answer()
+@router.business_connection()
+async def on_business_connection(update: BusinessConnection, bot: Bot):
+    """Пользователь подключил/отключил бота через Telegram Business."""
+    if update.is_enabled:
+        await db_save_bc(update.id, update.user.id)
+        log.info(f"Business connected: user={update.user.id} bc_id={update.id}")
+        try:
+            active = await is_subscribed(update.user.id)
+            if active:
+                await bot.send_message(
+                    update.user.id,
+                    "✅ <b>Telegram Business подключён!</b>\n\n"
+                    "Теперь ловлю в твоей личке:\n"
+                    "🗑 Удалённые сообщения собеседников\n"
+                    "✏️ Изменённые сообщения собеседников\n\n"
+                    "Всё перехваченное приходит сюда в ЛС."
+                )
+            else:
+                await bot.send_message(
+                    update.user.id,
+                    "⚠️ Telegram Business подключён, но подписка не активна.\n"
+                    "Активируй пробный период или купи подписку:",
+                    reply_markup=kb_sub()
+                )
+        except Exception as e:
+            log.warning(f"Could not notify user {update.user.id}: {e}")
+    else:
+        await db_deactivate_bc(update.id)
+        log.info(f"Business disconnected: user={update.user.id}")
 
-@router.callback_query(F.data == "connect_account")
-async def cb_connect(call: CallbackQuery, state: FSMContext):
-    if not await is_subscribed(call.from_user.id):
-        await call.answer("❌ Сначала активируй подписку!", show_alert=True)
+@router.business_message()
+async def on_business_message(message: Message):
+    """Новое сообщение в личке бизнес-аккаунта — кешируем."""
+    owner_id = await db_get_bc_owner(message.business_connection_id)
+    if not owner_id or not await is_subscribed(owner_id):
         return
-    await call.message.edit_text(
-        "📱 <b>Подключение аккаунта</b>\n\n"
-        "Введи номер телефона в формате:\n<code>+79991234567</code>",
-        reply_markup=kb_cancel()
-    )
-    await state.set_state(ConnectAccount.waiting_phone)
-    await call.answer()
+    await db_cache(message)
 
-@router.message(ConnectAccount.waiting_phone, F.text)
-async def fsm_phone(message: Message, state: FSMContext):
-    phone = message.text.strip()
-    if not phone.startswith("+") or len(phone) < 8:
-        await message.answer("❌ Неверный формат. Пример: <code>+79991234567</code>", reply_markup=kb_cancel())
+@router.edited_business_message()
+async def on_edited_business_message(message: Message, bot: Bot):
+    """Собеседник изменил сообщение в личке."""
+    owner_id = await db_get_bc_owner(message.business_connection_id)
+    if not owner_id or not await is_subscribed(owner_id):
         return
-    await message.answer("⏳ Отправляю код...")
-    ok, msg = await sm.start_login(message.from_user.id, phone)
-    if not ok:
-        await message.answer(msg, reply_markup=kb_cancel())
+
+    old = await db_get_cached(message.chat.id, message.message_id)
+    old_text = (old.get("text") or "[медиа]") if old else "[нет в кеше]"
+    new_text = message.text or message.caption or "[медиа]"
+    sender = message.from_user.full_name if message.from_user else "Аноним"
+    chat_title = (getattr(message.chat, "first_name", None) or
+                  getattr(message.chat, "title", None) or "Личка")
+
+    await notify_edited(bot, owner_id, f"Личка: {chat_title}", sender, old_text, new_text)
+    await db_cache(message)
+
+@router.deleted_business_messages()
+async def on_deleted_business_messages(event: BusinessMessagesDeleted, bot: Bot):
+    """Собеседник удалил сообщения в личке — главная фича!"""
+    owner_id = await db_get_bc_owner(event.business_connection_id)
+    if not owner_id or not await is_subscribed(owner_id):
         return
-    await state.update_data(phone=phone)
-    await state.set_state(ConnectAccount.waiting_code)
-    await message.answer(
-        f"✅ {msg}\n\nВведи код из Telegram (только цифры):",
-        reply_markup=kb_cancel()
-    )
 
-@router.message(ConnectAccount.waiting_code, F.text)
-async def fsm_code(message: Message, state: FSMContext):
-    code = message.text.strip().replace(" ", "").replace("-", "")
-    await message.answer("⏳ Проверяю...")
-    ok, msg, need_2fa = await sm.submit_code(message.from_user.id, code)
-    if need_2fa:
-        await state.set_state(ConnectAccount.waiting_2fa)
-        await message.answer(msg, reply_markup=kb_cancel())
-        return
-    await state.clear()
-    await message.answer(msg, reply_markup=kb_main() if ok else kb_cancel())
+    chat_id = event.chat.id
+    chat_name = (getattr(event.chat, "first_name", None) or
+                 getattr(event.chat, "title", None) or str(chat_id))
 
-@router.message(ConnectAccount.waiting_2fa, F.text)
-async def fsm_2fa(message: Message, state: FSMContext):
-    await message.answer("⏳ Проверяю пароль...")
-    ok, msg = await sm.submit_2fa(message.from_user.id, message.text.strip())
-    await state.clear()
-    await message.answer(msg, reply_markup=kb_main() if ok else kb_cancel())
+    for msg_id in event.message_ids:
+        cached = await db_get_cached(chat_id, msg_id)
+        if cached:
+            await notify_deleted(bot, owner_id, cached)
+            await db_del_cached(chat_id, msg_id)
+        else:
+            # Сообщение не было закешировано (отправлено до подключения бота)
+            try:
+                await bot.send_message(
+                    owner_id,
+                    f"🗑 <b>Удалено в личке</b>\n"
+                    f"💬 Собеседник: <b>{chat_name}</b>\n\n"
+                    f"⚠️ Не удалось восстановить — сообщение было отправлено "
+                    f"до подключения бота."
+                )
+            except Exception as e:
+                log.warning(f"notify failed: {e}")
 
-@router.callback_query(F.data == "cancel_connect")
-async def cb_cancel(call: CallbackQuery, state: FSMContext):
-    sm.cancel_login(call.from_user.id)
-    await state.clear()
-    await call.message.edit_text("❌ Подключение отменено.", reply_markup=kb_main())
-    await call.answer()
-
-@router.callback_query(F.data == "disconnect_account")
-async def cb_disconnect(call: CallbackQuery):
-    await sm.disconnect_user(call.from_user.id)
-    await call.message.edit_text(
-        "🔴 <b>Аккаунт отключён.</b>\n\nПеrehват удалённых сообщений остановлен.",
-        reply_markup=kb_account(False)
-    )
-    await call.answer("✅ Отключено")
-
-# ── бот добавлен/удалён из чата ────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════
+#  ГРУППЫ
+# ══════════════════════════════════════════════════════════
 
 @router.my_chat_member(ChatMemberUpdatedFilter(member_status_changed=MEMBER))
 async def bot_added(event: ChatMemberUpdated, bot: Bot):
@@ -895,45 +626,27 @@ async def bot_added(event: ChatMemberUpdated, bot: Bot):
             reply_markup=kb_sub())
         return
     await db_add_chat(adder, chat.id, chat.title or str(chat.id))
-    connected = sm.is_connected(adder)
-    extra = "✅ Аккаунт подключён — буду ловить и удалённые!" if connected \
-            else "⚠️ Подключи аккаунт (📱 Мой аккаунт) для перехвата удалённых."
     await bot.send_message(adder,
-        f"✅ Бот добавлен в <b>{chat.title}</b>!\n{extra}",
+        f"✅ Бот добавлен в группу <b>{chat.title}</b>!\n"
+        "Буду ловить удалённые и изменённые сообщения.",
         reply_markup=kb_main())
-    log.info(f"Bot added to chat {chat.id} by user {adder}")
+    log.info(f"Bot added to {chat.id} by {adder}")
 
 @router.my_chat_member(ChatMemberUpdatedFilter(member_status_changed=KICKED))
 async def bot_removed(event: ChatMemberUpdated):
     await db_remove_chat(event.chat.id)
 
-# ── кеш входящих сообщений ─────────────────────────────────────────────────
-
 @router.message(F.chat.type.in_({"group", "supergroup", "channel"}))
-async def cache_message(message: Message):
+async def cache_group_message(message: Message):
+    """Кешируем сообщения в группах."""
     owners = await active_owners(message.chat.id)
     if not owners:
         return
-    await db_cache_msg(message)
-    # одноразовые spoiler-медиа — пересылаем сразу
-    if getattr(message, "has_media_spoiler", False) and (message.photo or message.video):
-        sender = message.from_user.full_name if message.from_user else "Аноним"
-        title  = message.chat.title or str(message.chat.id)
-        for uid in owners:
-            try:
-                await message.bot.send_message(uid,
-                    f"🔥 <b>Одноразовое медиа</b>\n💬 Чат: <b>{title}</b>\n👤 От: <b>{sender}</b>")
-                if message.photo:
-                    await resend_media(message.bot, uid, "photo", message.photo[-1].file_id)
-                elif message.video:
-                    await resend_media(message.bot, uid, "video", message.video.file_id)
-            except Exception as e:
-                log.warning(f"spoiler notify failed for {uid}: {e}")
-
-# ── изменённые сообщения ───────────────────────────────────────────────────
+    await db_cache(message)
 
 @router.edited_message(F.chat.type.in_({"group", "supergroup", "channel"}))
-async def edited_message(message: Message):
+async def edited_group_message(message: Message):
+    """Изменённые сообщения в группах."""
     owners = await active_owners(message.chat.id)
     if not owners:
         return
@@ -944,124 +657,35 @@ async def edited_message(message: Message):
     title  = message.chat.title or str(message.chat.id)
     for uid in owners:
         await notify_edited(message.bot, uid, title, sender, old_text, new_text)
-    await db_cache_msg(message)
-
-
+    await db_cache(message)
 
 # ══════════════════════════════════════════════════════════
-#  TELEGRAM BUSINESS API
-#  Ловит сообщения в ЛИЧКЕ владельца бизнес-аккаунта.
-#  Требует: Telegram Premium + включить в @BotFather →
-#           Bot Settings → Business Mode → Enable
+#  АДМИН
 # ══════════════════════════════════════════════════════════
-
-# Хранилище: business_connection_id -> owner_user_id
-_business_connections: dict[str, int] = {}
-
-@router.business_connection()
-async def on_business_connection(update, bot: Bot):
-    """Пользователь подключил/отключил бота через Business."""
-    bc = update.business_connection
-    if bc.is_enabled:
-        _business_connections[bc.id] = bc.user.id
-        log.info(f"Business connection: user {bc.user.id} connected (@{bc.user.username})")
-        try:
-            await bot.send_message(
-                bc.user.id,
-                "✅ <b>Бизнес-подключение активно!</b>\n\n"
-                "Теперь я буду ловить в твоей личке:\n"
-                "🗑 Удалённые сообщения собеседников\n"
-                "✏️ Изменённые сообщения собеседников\n\n"
-                "Всё перехваченное приходит тебе сюда."
-            )
-        except Exception:
-            pass
-    else:
-        _business_connections.pop(bc.id, None)
-        log.info(f"Business connection: user {bc.user.id} disconnected")
-
-@router.business_message()
-async def on_business_message(message: Message):
-    """Кешируем входящие сообщения в личке бизнес-аккаунта."""
-    bc_id = message.business_connection_id
-    owner_id = _business_connections.get(bc_id)
-    if not owner_id:
-        return
-    if not await is_subscribed(owner_id):
-        return
-    # Кешируем под ID владельца как chat_id для единообразия
-    await db_cache_msg(message)
-
-@router.edited_business_message()
-async def on_edited_business_message(message: Message, bot: Bot):
-    """Собеседник изменил сообщение в личке владельца."""
-    bc_id = message.business_connection_id
-    owner_id = _business_connections.get(bc_id)
-    if not owner_id or not await is_subscribed(owner_id):
-        return
-
-    old = await db_get_cached(message.chat.id, message.message_id)
-    old_text = (old.get("text") or "[медиа]") if old else "[нет в кеше]"
-    new_text = message.text or message.caption or "[медиа]"
-    sender = message.from_user.full_name if message.from_user else "Аноним"
-    chat_title = f"Личка с {sender}"
-
-    await notify_edited(bot, owner_id, chat_title, sender, old_text, new_text)
-    await db_cache_msg(message)
-
-@router.deleted_business_messages()
-async def on_deleted_business_messages(event, bot: Bot):
-    """Собеседник удалил сообщения в личке владельца — это главная фича!"""
-    bc_id = event.business_connection_id
-    owner_id = _business_connections.get(bc_id)
-    if not owner_id or not await is_subscribed(owner_id):
-        return
-
-    chat_id = event.chat.id
-    for msg_id in event.message_ids:
-        cached = await db_get_cached(chat_id, msg_id)
-        if not cached:
-            # Сообщение не было закешировано (пришло до подключения бота)
-            try:
-                await bot.send_message(
-                    owner_id,
-                    f"🗑 <b>Удалено в личке</b>\n"
-                    f"💬 Чат: <b>{event.chat.first_name or event.chat.title or '?'}</b>\n"
-                    f"⚠️ Сообщение не удалось восстановить — оно было отправлено до подключения бота."
-                )
-            except Exception:
-                pass
-            continue
-        await notify_deleted(bot, owner_id, cached)
-        await db_del_cached(chat_id, msg_id)
-
-# ── админ ──────────────────────────────────────────────────────────────────
 
 @router.message(Command("admin"), F.from_user.id == ADMIN_ID)
 async def cmd_admin(message: Message):
-    stats = await db_stats()
+    s = await db_stats()
     await message.answer(
         f"🔧 <b>Администратор</b>\n\n"
-        f"👥 Пользователей: <b>{stats['users']}</b>\n"
-        f"💬 Чатов: <b>{stats['chats']}</b>\n"
-        f"📦 Кешировано: <b>{stats['cached']}</b>\n"
-        f"✅ Подписок: <b>{stats['active_subs']}</b>\n"
-        f"🎁 Триалов: <b>{stats['trials']}</b>\n"
-        f"📱 Юзерботов онлайн: <b>{sm.active_count()}</b>"
+        f"👥 Пользователей: <b>{s['users']}</b>\n"
+        f"💬 Групп: <b>{s['chats']}</b>\n"
+        f"📦 Кешировано: <b>{s['cached']}</b>\n"
+        f"✅ Подписок: <b>{s['subs']}</b>\n"
+        f"🎁 Триалов: <b>{s['trials']}</b>\n"
+        f"🏢 Business подключений: <b>{s['business']}</b>"
     )
 
 @router.message(Command("broadcast"), F.from_user.id == ADMIN_ID)
 async def cmd_broadcast(message: Message, bot: Bot):
     text = message.text.replace("/broadcast", "").strip()
     if not text:
-        await message.answer("Использование: /broadcast Текст")
-        return
-    users = await db_all_user_ids()
+        await message.answer("Использование: /broadcast Текст"); return
+    users = await db_all_ids()
     ok = fail = 0
     for uid in users:
         try:
-            await bot.send_message(uid, text)
-            ok += 1
+            await bot.send_message(uid, text); ok += 1
         except Exception:
             fail += 1
     await message.answer(f"📢 Рассылка: ✅{ok} / ❌{fail}")
@@ -1077,56 +701,35 @@ async def main():
     dp  = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
 
-    sm.set_bot(bot)
-
-    tasks = []
-
-    # Restore business connections from DB (в памяти не переживают рестарт,
-    # но пользователи переподключатся автоматически через бизнес-соединение)
-    log.info("Business API: готов принимать подключения через Telegram Business")
-
-    if API_ID and API_HASH:
-        await sm.restore_all()
-        tasks.append(asyncio.create_task(sm.run_forever()))
-        log.info("Session manager запущен — перехват удалённых сообщений активен")
-    else:
-        log.info("ℹ️  API_ID/API_HASH не заданы — перехват УДАЛЁННЫХ сообщений отключён.\n"
-                 "    Изменённые сообщения и одноразовые медиа всё равно ловятся.\n"
-                 "    Чтобы включить перехват удалённых: заполни API_ID и API_HASH в bot.py\n"
-                 "    (получить на my.telegram.org → API development tools)")
-
-    tasks.append(asyncio.create_task(
-        dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types() + ["business_connection", "business_message", "edited_business_message", "deleted_business_messages"])
-    ))
-
     print("\n" + "="*50)
     print("  ✅ SpyBot запущен!")
-    print(f"  📋 Режим: {'полный (удалённые + изменённые)' if API_ID and API_HASH else 'частичный (только изменённые)'}")
+    print("  🏢 Режим: Telegram Business API")
     print(f"  🗄  База данных: {DB_PATH}")
     print("  💬 Напиши боту /start в Telegram")
     print("="*50 + "\n")
-    try:
-        await asyncio.gather(*tasks)
-    finally:
-        await sm.shutdown()
-        await bot.session.close()
+
+    await dp.start_polling(
+        bot,
+        allowed_updates=[
+            "message", "edited_message", "callback_query",
+            "my_chat_member", "pre_checkout_query",
+            "business_connection", "business_message",
+            "edited_business_message", "deleted_business_messages",
+        ]
+    )
 
 if __name__ == "__main__":
-    # ── Проверка настроек перед запуском ──────────────────────────────────
     errors = []
-    if not BOT_TOKEN or "СЮДА" in BOT_TOKEN or "ТОКЕН" in BOT_TOKEN or len(BOT_TOKEN) < 20:
-        errors.append("  BOT_TOKEN  — токен от @BotFather (открой bot.py и замени ВСТАВЬ_ТОКЕН_БОТА)")
+    if not BOT_TOKEN or "СЮДА" in BOT_TOKEN:
+        errors.append("  BOT_TOKEN — токен от @BotFather")
     if not ADMIN_ID:
-        errors.append("  ADMIN_ID   — твой Telegram ID (узнай у @userinfobot)")
+        errors.append("  ADMIN_ID  — твой Telegram ID (узнай у @userinfobot)")
     if errors:
-        print("\n" + "="*55)
-        print("  SpyBot: заполни настройки в начале файла bot.py!")
-        print("="*55)
-        for e in errors:
-            print(e)
-        print("="*55)
-        print("  Открой bot.py, найди строки BOT_TOKEN / ADMIN_ID")
-        print("  и замени значения на свои.\n")
+        print("\n" + "="*50)
+        print("  SpyBot: заполни настройки в bot.py!")
+        print("="*50)
+        for e in errors: print(e)
+        print("="*50 + "\n")
         sys.exit(0)
     try:
         asyncio.run(main())
