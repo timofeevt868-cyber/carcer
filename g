@@ -374,11 +374,17 @@ async def active_owners(chat_id: int) -> list[int]:
 
 def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Мои чаты",            callback_data="my_chats")],
-        [InlineKeyboardButton(text="👤 Профиль / Подписка",  callback_data="profile")],
-        [InlineKeyboardButton(text="🔄 Восстановить чаты",   callback_data="restore_chats")],
+        [InlineKeyboardButton(text="📋 Мои чаты",              callback_data="my_chats")],
+        [InlineKeyboardButton(text="👤 Профиль / Подписка",    callback_data="profile")],
+        [InlineKeyboardButton(text="🔄 Восстановить переписку", callback_data="restore_menu")],
         [InlineKeyboardButton(text="👥 Реферальная программа", callback_data="referral")],
-        [InlineKeyboardButton(text="❓ Как это работает",     callback_data="howto")],
+        [InlineKeyboardButton(text="❓ Как это работает",       callback_data="howto")],
+    ])
+
+def kb_restore_confirm() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, восстановить", callback_data="restore_confirm")],
+        [InlineKeyboardButton(text="◀️ Отмена",           callback_data="back_main")],
     ])
 
 def kb_sub() -> InlineKeyboardMarkup:
@@ -598,101 +604,144 @@ async def cb_referral(call: CallbackQuery, bot: Bot):
     )
     await call.answer()
 
-# ── восстановление чатов ───────────────────────────────────
+# ── восстановление переписки ───────────────────────────────
 
-@router.callback_query(F.data == "restore_chats")
-async def cb_restore_chats(call: CallbackQuery):
+async def db_get_cached_chats(user_id: int) -> list[dict]:
+    """Все уникальные чаты из кеша, связанные с Business-подключением пользователя."""
+    bc_id = await db_get_user_bc(user_id)
+    if not bc_id:
+        return []
+    # Ищем все chat_id, у которых в кеше есть сообщения
+    async with _db.execute(
+        """SELECT chat_id, chat_title, COUNT(*) as msg_count,
+                  MAX(date) as last_date
+           FROM message_cache
+           GROUP BY chat_id
+           ORDER BY last_date DESC"""
+    ) as c:
+        rows = await c.fetchall()
+    return [dict(r) for r in rows]
+
+@router.callback_query(F.data == "restore_menu")
+async def cb_restore_menu(call: CallbackQuery):
     if not await is_subscribed(call.from_user.id):
         await call.answer("❌ Нужна активная подписка!", show_alert=True); return
 
-    chats = await db_user_chats(call.from_user.id)
-    bc    = await db_get_user_bc(call.from_user.id)
+    cached_chats = await db_get_cached_chats(call.from_user.id)
 
-    # Собираем все chat_id: группы + чаты из Business-кеша
-    chat_ids = [c["chat_id"] for c in chats]
-
-    # Считаем сколько сообщений в кеше
-    total = 0
-    for cid in chat_ids:
-        msgs = await db_get_chat_history(cid)
-        total += len(msgs)
-
-    if total == 0:
+    if not cached_chats:
         await call.message.edit_text(
-            "🔄 <b>Восстановление чатов</b>\n\n"
-            "В кеше нет сохранённых сообщений.\n\n"
-            "Сообщения начнут кешироваться автоматически с момента добавления бота в чат "
-            "или подключения через Telegram Business.",
+            "🔄 <b>Восстановление переписки</b>\n\n"
+            "❌ В кеше нет сохранённых чатов.\n\n"
+            "Бот кеширует сообщения пока подключён через Telegram Business. "
+            "Если собеседник удалит чат — ты сможешь его восстановить здесь.",
             reply_markup=kb_back()
         )
-        await call.answer(); return
+        await call.answer()
+        return
+
+    # Показываем список чатов из кеша — каждый как отдельная кнопка
+    buttons = []
+    for ch in cached_chats[:10]:  # максимум 10 кнопок
+        title = ch.get("chat_title") or f"Чат {ch['chat_id']}"
+        count = ch.get("msg_count", 0)
+        last  = ch.get("last_date", "")[:10] if ch.get("last_date") else ""
+        buttons.append([InlineKeyboardButton(
+            text=f"💬 {title} ({count} сообщ.) · {last}",
+            callback_data=f"restore_chat_{ch['chat_id']}"
+        )])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")])
 
     await call.message.edit_text(
-        f"🔄 <b>Восстановление чатов</b>\n\n"
-        f"В кеше найдено <b>{total} сообщений</b> из <b>{len(chat_ids)} чатов</b>.\n\n"
-        f"Все сообщения будут отправлены тебе в ЛС — это может занять некоторое время.\n\n"
-        f"Продолжить?",
-        reply_markup=kb_restore_confirm()
+        f"🔄 <b>Восстановление переписки</b>\n\n"
+        f"Выбери чат который хочешь восстановить:\n"
+        f"<i>Найдено {len(cached_chats)} чатов в кеше</i>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
     )
     await call.answer()
 
-@router.callback_query(F.data == "restore_confirm")
-async def cb_restore_confirm(call: CallbackQuery, bot: Bot):
+@router.callback_query(F.data.startswith("restore_chat_"))
+async def cb_restore_chat(call: CallbackQuery, bot: Bot):
     if not await is_subscribed(call.from_user.id):
         await call.answer("❌ Нужна активная подписка!", show_alert=True); return
 
-    user_id = call.from_user.id
-    chats   = await db_user_chats(user_id)
-    chat_ids = [c["chat_id"] for c in chats]
+    try:
+        chat_id = int(call.data.replace("restore_chat_", ""))
+    except ValueError:
+        await call.answer("❌ Ошибка", show_alert=True); return
 
-    await call.message.edit_text("⏳ Восстанавливаю переписку, подожди...")
+    msgs = await db_get_chat_history(chat_id)
+    if not msgs:
+        await call.answer("❌ Сообщения не найдены в кеше", show_alert=True); return
+
+    title = msgs[0].get("chat_title") or str(chat_id)
+    user_id = call.from_user.id
+
+    await call.message.edit_text(
+        f"⏳ Восстанавливаю переписку с <b>{title}</b>...\n"
+        f"Сообщений: <b>{len(msgs)}</b>"
+    )
     await call.answer()
 
-    sent = 0
-    for cid in chat_ids:
-        msgs = await db_get_chat_history(cid)
-        if not msgs: continue
-
-        # Заголовок чата
-        title = msgs[0].get("chat_title") or str(cid)
-        try:
-            await bot.send_message(
-                user_id,
-                f"📂 <b>Чат: {title}</b>\n"
-                f"📨 Сообщений в кеше: <b>{len(msgs)}</b>\n"
-                f"──────────────────"
-            )
-        except Exception:
-            pass
-
-        for msg in msgs:
-            date_str = msg["date"].strftime("%d.%m.%Y %H:%M")
-            sender   = msg.get("sender_name") or "Аноним"
-            text     = msg.get("text") or ""
-            media_type = msg.get("media_type")
-            file_id    = msg.get("file_id")
-
-            caption = (
-                f"👤 <b>{sender}</b> · {date_str}\n"
-                + (f"📝 {text}" if text else "")
-            )
-
-            try:
-                if text and not media_type:
-                    await bot.send_message(user_id, caption)
-                elif file_id and media_type:
-                    await bot.send_message(user_id, caption)
-                    await resend_media(bot, user_id, media_type, file_id)
-                sent += 1
-                await asyncio.sleep(0.05)  # антиспам
-            except Exception as e:
-                log.warning(f"restore send error: {e}")
-
+    # Шапка восстановленного чата
+    first_date = msgs[0]["date"].strftime("%d.%m.%Y")
+    last_date  = msgs[-1]["date"].strftime("%d.%m.%Y")
     await bot.send_message(
         user_id,
-        f"✅ <b>Восстановление завершено!</b>\n\n"
-        f"Отправлено сообщений: <b>{sent}</b>",
-        reply_markup=kb_main()
+        f"📂 ─────────────────────\n"
+        f"   <b>Восстановленный чат</b>\n"
+        f"   💬 {title}\n"
+        f"   📅 {first_date} — {last_date}\n"
+        f"   📨 {len(msgs)} сообщений\n"
+        f"─────────────────────"
+    )
+
+    sent = 0
+    prev_sender = None
+
+    for msg in msgs:
+        date_str   = msg["date"].strftime("%d.%m.%Y %H:%M")
+        sender     = msg.get("sender_name") or "Аноним"
+        text       = msg.get("text") or ""
+        media_type = msg.get("media_type")
+        file_id    = msg.get("file_id")
+
+        # Визуальный разделитель при смене собеседника
+        if sender != prev_sender:
+            prev_sender = sender
+            sep = "➤" if sender != title else "◀"
+            header = f"{sep} <b>{sender}</b>  <i>{date_str}</i>"
+        else:
+            header = f"   <i>{date_str}</i>"
+
+        try:
+            if text and not media_type:
+                # Обычное текстовое сообщение
+                await bot.send_message(
+                    user_id,
+                    f"{header}\n{text}"
+                )
+            elif file_id and media_type:
+                # Медиа с подписью
+                caption_text = f"{header}" + (f"\n{text}" if text else "")
+                await bot.send_message(user_id, caption_text)
+                await resend_media(bot, user_id, media_type, file_id)
+            sent += 1
+            await asyncio.sleep(0.05)
+        except Exception as e:
+            log.warning(f"restore send error: {e}")
+
+    # Подвал
+    await bot.send_message(
+        user_id,
+        f"✅ ─────────────────────\n"
+        f"   Переписка восстановлена\n"
+        f"   Отправлено: <b>{sent}</b> из <b>{len(msgs)}</b>\n"
+        f"─────────────────────",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Восстановить ещё", callback_data="restore_menu")],
+            [InlineKeyboardButton(text="🏠 Главное меню",     callback_data="back_main")],
+        ])
     )
 
 # ── как это работает ───────────────────────────────────────
