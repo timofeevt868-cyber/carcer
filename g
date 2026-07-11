@@ -33,7 +33,6 @@ if not _install_missing():
 # ══════════════════════════════════════════════════════════
 #  ▼▼▼  НАСТРОЙКИ — ЗАПОЛНИ ЭТИ 2 СТРОКИ  ▼▼▼
 # ══════════════════════════════════════════════════════════
-import os
 
 BOT_TOKEN   = "8989924852:AAFPev4Tva0mBjXMqIDlxLzmdrEEZCfCSR4"  # ← @BotFather → /newbot → скопируй токен
 ADMIN_ID    = 8769232009   # ← твой Telegram ID (напиши @userinfobot — он ответит числом)
@@ -295,8 +294,8 @@ async def db_cache(message: Message):
             (message.chat.id, message.message_id, title, sender,
              message.text or message.caption, mt, fi, message.date))
         await _db.commit()
-    except Exception as e:
-        log.warning(f"cache error: {e}")
+    except Exception as err:
+        log.warning(f"cache error: {err}")
     # чистка старых
     cutoff = datetime.utcnow() - timedelta(hours=48)
     await _db.execute("DELETE FROM message_cache WHERE chat_id=? AND cached_at<?",
@@ -398,12 +397,6 @@ def kb_back() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")]
     ])
 
-def kb_restore_confirm() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Да, восстановить", callback_data="restore_confirm")],
-        [InlineKeyboardButton(text="◀️ Отмена",           callback_data="back_main")],
-    ])
-
 # ══════════════════════════════════════════════════════════
 #  УВЕДОМЛЕНИЯ
 # ══════════════════════════════════════════════════════════
@@ -424,8 +417,8 @@ async def notify_deleted(bot: Bot, user_id: int, cached: dict):
             await resend_media(bot, user_id, cached["media_type"], cached["file_id"])
         else:
             await bot.send_message(user_id, header + "\n[медиа]")
-    except Exception as e:
-        log.warning(f"notify_deleted failed for {user_id}: {e}")
+    except Exception as err:
+        log.warning(f"notify_deleted failed for {user_id}: {err}")
 
 async def notify_edited(bot: Bot, user_id: int, chat_title: str,
                         sender: str, old_text: str, new_text: str):
@@ -438,8 +431,8 @@ async def notify_edited(bot: Bot, user_id: int, chat_title: str,
             f"📝 <b>Было:</b>\n{old_text}\n\n"
             f"📝 <b>Стало:</b>\n{new_text}"
         )
-    except Exception as e:
-        log.warning(f"notify_edited failed for {user_id}: {e}")
+    except Exception as err:
+        log.warning(f"notify_edited failed for {user_id}: {err}")
 
 async def resend_media(bot: Bot, user_id: int, media_type: str, file_id: str):
     try:
@@ -449,8 +442,8 @@ async def resend_media(bot: Bot, user_id: int, media_type: str, file_id: str):
              "video_note": bot.send_video_note}
         if media_type in m:
             await m[media_type](user_id, file_id)
-    except Exception as e:
-        log.warning(f"resend_media: {e}")
+    except Exception as err:
+        log.warning(f"resend_media: {err}")
 
 # ══════════════════════════════════════════════════════════
 #  РОУТЕР / ХЕНДЛЕРЫ
@@ -498,7 +491,7 @@ async def cmd_start(message: Message, bot: Bot):
             pass
 
     # Обновляем streak
-    streak, is_new_day = await db_update_streak(user_id)
+    streak, _ = await db_update_streak(user_id)
 
     active = await is_subscribed(user_id)
     if active:
@@ -728,8 +721,8 @@ async def cb_restore_chat(call: CallbackQuery, bot: Bot):
                 await resend_media(bot, user_id, media_type, file_id)
             sent += 1
             await asyncio.sleep(0.05)
-        except Exception as e:
-            log.warning(f"restore send error: {e}")
+        except Exception as err:
+            log.warning(f"restore send error: {err}")
 
     # Подвал
     await bot.send_message(
@@ -849,8 +842,8 @@ async def on_business_connection(update: BusinessConnection, bot: Bot):
                     "⚠️ Business подключён, но подписка не активна.",
                     reply_markup=kb_sub()
                 )
-        except Exception as e:
-            log.warning(f"bc notify error: {e}")
+        except Exception as err:
+            log.warning(f"bc notify error: {err}")
     else:
         await db_deactivate_bc(update.id)
         log.info(f"Business disconnected: user={update.user.id}")
@@ -861,10 +854,33 @@ async def on_business_message(message: Message, bot: Bot):
     if not owner_id or not await is_subscribed(owner_id):
         return
 
-    # ── Сгорающие / одноразовые медиа ──────────────────────────────────────
-    # Через Business API бот получает сообщение ДО того как оно сгорает.
-    # has_media_spoiler=True означает одноразовое фото/видео — перехватываем сразу.
+    # ── Отладка: показываем ВСЁ что пришло (удали после проверки) ──────────
+    try:
+        debug_lines = [
+            f"📨 <b>DEBUG: входящее сообщение</b>",
+            f"has_media_spoiler: {getattr(message, 'has_media_spoiler', 'нет поля')}",
+            f"photo: {'есть' if message.photo else 'нет'}",
+            f"video: {'есть' if message.video else 'нет'}",
+            f"video_note: {'есть' if message.video_note else 'нет'}",
+            f"voice: {'есть' if message.voice else 'нет'}",
+            f"text: {message.text or 'нет'}",
+            f"content_type: {message.content_type}",
+        ]
+        # Показываем raw json для диагностики
+        try:
+            import json
+            raw = message.model_dump(exclude_none=True)
+            debug_lines.append(f"raw keys: {list(raw.keys())}")
+        except Exception:
+            pass
+        await bot.send_message(owner_id, "\n".join(debug_lines))
+    except Exception as err:
+        log.warning(f"debug send failed: {err}")
+
+    # ── Одноразовые медиа ───────────────────────────────────────────────────
+    # Проверяем has_media_spoiler И просто наличие медиа (на случай если флаг не приходит)
     is_once = bool(getattr(message, "has_media_spoiler", False))
+    
     if is_once and (message.photo or message.video or message.video_note):
         sender = message.from_user.full_name if message.from_user else "Аноним"
         chat_name = (getattr(message.chat, "first_name", None) or
@@ -885,10 +901,9 @@ async def on_business_message(message: Message, bot: Bot):
                                      caption="🎥 Одноразовое видео")
             elif message.video_note:
                 await bot.send_video_note(owner_id, message.video_note.file_id)
-        except Exception as e:
-            log.warning(f"once-media forward failed for {owner_id}: {e}")
+        except Exception as err:
+            log.warning(f"once-media forward failed for {owner_id}: {err}")
 
-    # Кешируем всё (и обычные и одноразовые — для восстановления)
     await db_cache(message)
 
 @router.edited_business_message()
@@ -926,8 +941,8 @@ async def on_deleted_business_messages(event: BusinessMessagesDeleted, bot: Bot)
                     f"💬 Собеседник: <b>{chat_name}</b>\n"
                     f"⚠️ Не удалось восстановить — сообщение было до подключения бота."
                 )
-            except Exception as e:
-                log.warning(f"bc deleted notify error: {e}")
+            except Exception as err:
+                log.warning(f"bc deleted notify error: {err}")
 
 # ══════════════════════════════════════════════════════════
 #  ГРУППЫ
@@ -980,8 +995,8 @@ async def cache_group_message(message: Message, bot: Bot):
                                          caption="🎥 Одноразовое видео")
                 elif message.video_note:
                     await bot.send_video_note(uid, message.video_note.file_id)
-            except Exception as e:
-                log.warning(f"group once-media failed for {uid}: {e}")
+            except Exception as err:
+                log.warning(f"group once-media failed for {uid}: {err}")
 
     await db_cache(message)
 
