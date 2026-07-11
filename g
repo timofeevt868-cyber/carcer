@@ -35,7 +35,7 @@ if not _install_missing():
 # ══════════════════════════════════════════════════════════
 import os
 
-BOT_TOKEN   = "8989924852:AAFPev4Tva0mBjXMqIDlxLzmdrEEZCfCSR4"  # ← @BotFather → /newbot → скопируй токен
+BOT_TOKEN   = " "8989924852:AAFPev4Tva0mBjXMqIDlxLzmdrEEZCfCS"  # ← @BotFather → /newbot → скопируй токен
 ADMIN_ID    = 8769232009   # ← твой Telegram ID (напиши @userinfobot — он ответит числом)
 
 STARS_PRICE = 69    # цена подписки в Telegram Stars
@@ -856,10 +856,39 @@ async def on_business_connection(update: BusinessConnection, bot: Bot):
         log.info(f"Business disconnected: user={update.user.id}")
 
 @router.business_message()
-async def on_business_message(message: Message):
+async def on_business_message(message: Message, bot: Bot):
     owner_id = await db_get_bc_owner(message.business_connection_id)
     if not owner_id or not await is_subscribed(owner_id):
         return
+
+    # ── Сгорающие / одноразовые медиа ──────────────────────────────────────
+    # Через Business API бот получает сообщение ДО того как оно сгорает.
+    # has_media_spoiler=True означает одноразовое фото/видео — перехватываем сразу.
+    is_once = bool(getattr(message, "has_media_spoiler", False))
+    if is_once and (message.photo or message.video or message.video_note):
+        sender = message.from_user.full_name if message.from_user else "Аноним"
+        chat_name = (getattr(message.chat, "first_name", None) or
+                     getattr(message.chat, "title", None) or "Собеседник")
+        date_str = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
+        try:
+            await bot.send_message(
+                owner_id,
+                f"🔥 <b>Одноразовое сообщение перехвачено!</b>\n"
+                f"💬 От: <b>{sender}</b> ({chat_name})\n"
+                f"🕐 {date_str}"
+            )
+            if message.photo:
+                await bot.send_photo(owner_id, message.photo[-1].file_id,
+                                     caption="📸 Одноразовое фото")
+            elif message.video:
+                await bot.send_video(owner_id, message.video.file_id,
+                                     caption="🎥 Одноразовое видео")
+            elif message.video_note:
+                await bot.send_video_note(owner_id, message.video_note.file_id)
+        except Exception as e:
+            log.warning(f"once-media forward failed for {owner_id}: {e}")
+
+    # Кешируем всё (и обычные и одноразовые — для восстановления)
     await db_cache(message)
 
 @router.edited_business_message()
@@ -926,9 +955,34 @@ async def bot_removed(event: ChatMemberUpdated):
     await db_remove_chat(event.chat.id)
 
 @router.message(F.chat.type.in_({"group", "supergroup", "channel"}))
-async def cache_group_message(message: Message):
+async def cache_group_message(message: Message, bot: Bot):
     owners = await active_owners(message.chat.id)
     if not owners: return
+
+    # Сгорающие / spoiler-медиа в группах — перехватываем сразу
+    is_once = bool(getattr(message, "has_media_spoiler", False))
+    if is_once and (message.photo or message.video or message.video_note):
+        sender = message.from_user.full_name if message.from_user else "Аноним"
+        chat_name = message.chat.title or str(message.chat.id)
+        for uid in owners:
+            try:
+                await bot.send_message(
+                    uid,
+                    f"🔥 <b>Одноразовое сообщение в группе!</b>\n"
+                    f"💬 Чат: <b>{chat_name}</b>\n"
+                    f"👤 От: <b>{sender}</b>"
+                )
+                if message.photo:
+                    await bot.send_photo(uid, message.photo[-1].file_id,
+                                         caption="📸 Одноразовое фото")
+                elif message.video:
+                    await bot.send_video(uid, message.video.file_id,
+                                         caption="🎥 Одноразовое видео")
+                elif message.video_note:
+                    await bot.send_video_note(uid, message.video_note.file_id)
+            except Exception as e:
+                log.warning(f"group once-media failed for {uid}: {e}")
+
     await db_cache(message)
 
 @router.edited_message(F.chat.type.in_({"group", "supergroup", "channel"}))
