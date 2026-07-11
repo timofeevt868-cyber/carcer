@@ -854,33 +854,9 @@ async def on_business_message(message: Message, bot: Bot):
     if not owner_id or not await is_subscribed(owner_id):
         return
 
-    # ── Отладка: показываем ВСЁ что пришло (удали после проверки) ──────────
-    try:
-        debug_lines = [
-            f"📨 <b>DEBUG: входящее сообщение</b>",
-            f"has_media_spoiler: {getattr(message, 'has_media_spoiler', 'нет поля')}",
-            f"photo: {'есть' if message.photo else 'нет'}",
-            f"video: {'есть' if message.video else 'нет'}",
-            f"video_note: {'есть' if message.video_note else 'нет'}",
-            f"voice: {'есть' if message.voice else 'нет'}",
-            f"text: {message.text or 'нет'}",
-            f"content_type: {message.content_type}",
-        ]
-        # Показываем raw json для диагностики
-        try:
-            import json
-            raw = message.model_dump(exclude_none=True)
-            debug_lines.append(f"raw keys: {list(raw.keys())}")
-        except Exception:
-            pass
-        await bot.send_message(owner_id, "\n".join(debug_lines))
-    except Exception as err:
-        log.warning(f"debug send failed: {err}")
-
-    # ── Одноразовые медиа ───────────────────────────────────────────────────
-    # Проверяем has_media_spoiler И просто наличие медиа (на случай если флаг не приходит)
+    # ── Одноразовые медиа через has_media_spoiler ──────────────────────────
     is_once = bool(getattr(message, "has_media_spoiler", False))
-    
+
     if is_once and (message.photo or message.video or message.video_note):
         sender = message.from_user.full_name if message.from_user else "Аноним"
         chat_name = (getattr(message.chat, "first_name", None) or
@@ -905,6 +881,69 @@ async def on_business_message(message: Message, bot: Bot):
             log.warning(f"once-media forward failed for {owner_id}: {err}")
 
     await db_cache(message)
+
+@router.business_message()
+async def on_business_reply(message: Message, bot: Bot):
+    """Пользователь ответил на сообщение — проверяем reply_to_message.
+    Именно так перехватываются одноразовые фото/видео:
+    собеседник присылает одноразовое → ты отвечаешь любым сообщением →
+    бот видит оригинал в reply_to_message и пересылает тебе."""
+    owner_id = await db_get_bc_owner(message.business_connection_id)
+    if not owner_id or not await is_subscribed(owner_id):
+        return
+
+    reply = message.reply_to_message
+    if not reply:
+        return
+
+    # Проверяем есть ли в оригинале медиа
+    has_photo      = bool(reply.photo)
+    has_video      = bool(reply.video)
+    has_video_note = bool(reply.video_note)
+    has_voice      = bool(reply.voice)
+    has_audio      = bool(reply.audio)
+    has_doc        = bool(reply.document)
+    has_sticker    = bool(reply.sticker)
+    is_once        = bool(getattr(reply, "has_media_spoiler", False))
+
+    # Если в оригинале нет медиа — не интересно
+    if not any([has_photo, has_video, has_video_note, has_voice,
+                has_audio, has_doc, has_sticker]):
+        return
+
+    sender = reply.from_user.full_name if reply.from_user else "Аноним"
+    chat_name = (getattr(reply.chat, "first_name", None) or
+                 getattr(reply.chat, "title", None) or "Собеседник")
+    date_str = reply.date.strftime("%d.%m.%Y %H:%M") if reply.date else "?"
+
+    label = "🔥 Одноразовое" if is_once else "📎 Медиа из ответа"
+
+    try:
+        await bot.send_message(
+            owner_id,
+            f"{label} — <b>перехвачено через ответ!</b>\n"
+            f"💬 От: <b>{sender}</b> ({chat_name})\n"
+            f"🕐 {date_str}"
+        )
+        if has_photo:
+            await bot.send_photo(owner_id, reply.photo[-1].file_id,
+                                 caption=f"📸 {'Одноразовое фото' if is_once else 'Фото'}")
+        elif has_video:
+            await bot.send_video(owner_id, reply.video.file_id,
+                                 caption=f"🎥 {'Одноразовое видео' if is_once else 'Видео'}")
+        elif has_video_note:
+            await bot.send_video_note(owner_id, reply.video_note.file_id)
+        elif has_voice:
+            await bot.send_voice(owner_id, reply.voice.file_id)
+        elif has_audio:
+            await bot.send_audio(owner_id, reply.audio.file_id)
+        elif has_doc:
+            await bot.send_document(owner_id, reply.document.file_id)
+        elif has_sticker:
+            await bot.send_sticker(owner_id, reply.sticker.file_id)
+    except Exception as err:
+        log.warning(f"reply intercept failed for {owner_id}: {err}")
+
 
 @router.edited_business_message()
 async def on_edited_business_message(message: Message, bot: Bot):
