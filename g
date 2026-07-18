@@ -34,7 +34,7 @@ if not _install_missing():
 #  ▼▼▼  НАСТРОЙКИ — ЗАПОЛНИ ЭТИ 2 СТРОКИ  ▼▼▼
 # ══════════════════════════════════════════════════════════
 
-BOT_TOKEN   = "8989924852:AAFPev4Tva0mBjXMqIDlxLzmdrEEZCfCSR4"  # ← @BotFather → /newbot → скопируй токен
+BOT_TOKEN   = "8989924852:AAE__wAqyl80DECGZLy99ou72VFrKOk0g7Q"  # ← @BotFather → /newbot → скопируй токен
 ADMIN_ID    = 8769232009   # ← твой Telegram ID (напиши @userinfobot — он ответит числом)
 
 STARS_PRICE = 69    # цена подписки в Telegram Stars
@@ -321,18 +321,6 @@ async def db_del_cached(chat_id: int, msg_id: int):
         "DELETE FROM message_cache WHERE chat_id=? AND message_id=?", (chat_id, msg_id))
     await _db.commit()
 
-async def db_get_chat_history(chat_id: int) -> list[dict]:
-    """Все кешированные сообщения чата по порядку."""
-    async with _db.execute(
-        "SELECT * FROM message_cache WHERE chat_id=? ORDER BY date ASC", (chat_id,)
-    ) as c:
-        rows = await c.fetchall()
-    result = []
-    for r in rows:
-        d = dict(r)
-        d["date"] = _dt(d.get("date")) or datetime.utcnow()
-        result.append(d)
-    return result
 
 # ── stats ──────────────────────────────────────────────────
 
@@ -375,16 +363,10 @@ def kb_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📋 Мои чаты",              callback_data="my_chats")],
         [InlineKeyboardButton(text="👤 Профиль / Подписка",    callback_data="profile")],
-        [InlineKeyboardButton(text="🔄 Восстановить переписку", callback_data="restore_menu")],
         [InlineKeyboardButton(text="👥 Реферальная программа", callback_data="referral")],
         [InlineKeyboardButton(text="❓ Как это работает",       callback_data="howto")],
     ])
 
-def kb_restore_confirm() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Да, восстановить", callback_data="restore_confirm")],
-        [InlineKeyboardButton(text="◀️ Отмена",           callback_data="back_main")],
-    ])
 
 def kb_sub() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -597,146 +579,6 @@ async def cb_referral(call: CallbackQuery, bot: Bot):
     )
     await call.answer()
 
-# ── восстановление переписки ───────────────────────────────
-
-async def db_get_cached_chats(user_id: int) -> list[dict]:
-    """Все уникальные чаты из кеша, связанные с Business-подключением пользователя."""
-    bc_id = await db_get_user_bc(user_id)
-    if not bc_id:
-        return []
-    # Ищем все chat_id, у которых в кеше есть сообщения
-    async with _db.execute(
-        """SELECT chat_id, chat_title, COUNT(*) as msg_count,
-                  MAX(date) as last_date
-           FROM message_cache
-           GROUP BY chat_id
-           ORDER BY last_date DESC"""
-    ) as c:
-        rows = await c.fetchall()
-    return [dict(r) for r in rows]
-
-@router.callback_query(F.data == "restore_menu")
-async def cb_restore_menu(call: CallbackQuery):
-    if not await is_subscribed(call.from_user.id):
-        await call.answer("❌ Нужна активная подписка!", show_alert=True); return
-
-    cached_chats = await db_get_cached_chats(call.from_user.id)
-
-    if not cached_chats:
-        await call.message.edit_text(
-            "🔄 <b>Восстановление переписки</b>\n\n"
-            "❌ В кеше нет сохранённых чатов.\n\n"
-            "Бот кеширует сообщения пока подключён через Telegram Business. "
-            "Если собеседник удалит чат — ты сможешь его восстановить здесь.",
-            reply_markup=kb_back()
-        )
-        await call.answer()
-        return
-
-    # Показываем список чатов из кеша — каждый как отдельная кнопка
-    buttons = []
-    for ch in cached_chats[:10]:  # максимум 10 кнопок
-        title = ch.get("chat_title") or f"Чат {ch['chat_id']}"
-        count = ch.get("msg_count", 0)
-        last  = ch.get("last_date", "")[:10] if ch.get("last_date") else ""
-        buttons.append([InlineKeyboardButton(
-            text=f"💬 {title} ({count} сообщ.) · {last}",
-            callback_data=f"restore_chat_{ch['chat_id']}"
-        )])
-    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="back_main")])
-
-    await call.message.edit_text(
-        f"🔄 <b>Восстановление переписки</b>\n\n"
-        f"Выбери чат который хочешь восстановить:\n"
-        f"<i>Найдено {len(cached_chats)} чатов в кеше</i>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
-    )
-    await call.answer()
-
-@router.callback_query(F.data.startswith("restore_chat_"))
-async def cb_restore_chat(call: CallbackQuery, bot: Bot):
-    if not await is_subscribed(call.from_user.id):
-        await call.answer("❌ Нужна активная подписка!", show_alert=True); return
-
-    try:
-        chat_id = int(call.data.replace("restore_chat_", ""))
-    except ValueError:
-        await call.answer("❌ Ошибка", show_alert=True); return
-
-    msgs = await db_get_chat_history(chat_id)
-    if not msgs:
-        await call.answer("❌ Сообщения не найдены в кеше", show_alert=True); return
-
-    title = msgs[0].get("chat_title") or str(chat_id)
-    user_id = call.from_user.id
-
-    await call.message.edit_text(
-        f"⏳ Восстанавливаю переписку с <b>{title}</b>...\n"
-        f"Сообщений: <b>{len(msgs)}</b>"
-    )
-    await call.answer()
-
-    # Шапка восстановленного чата
-    first_date = msgs[0]["date"].strftime("%d.%m.%Y")
-    last_date  = msgs[-1]["date"].strftime("%d.%m.%Y")
-    await bot.send_message(
-        user_id,
-        f"📂 ─────────────────────\n"
-        f"   <b>Восстановленный чат</b>\n"
-        f"   💬 {title}\n"
-        f"   📅 {first_date} — {last_date}\n"
-        f"   📨 {len(msgs)} сообщений\n"
-        f"─────────────────────"
-    )
-
-    sent = 0
-    prev_sender = None
-
-    for msg in msgs:
-        date_str   = msg["date"].strftime("%d.%m.%Y %H:%M")
-        sender     = msg.get("sender_name") or "Аноним"
-        text       = msg.get("text") or ""
-        media_type = msg.get("media_type")
-        file_id    = msg.get("file_id")
-
-        # Визуальный разделитель при смене собеседника
-        if sender != prev_sender:
-            prev_sender = sender
-            sep = "➤" if sender != title else "◀"
-            header = f"{sep} <b>{sender}</b>  <i>{date_str}</i>"
-        else:
-            header = f"   <i>{date_str}</i>"
-
-        try:
-            if text and not media_type:
-                # Обычное текстовое сообщение
-                await bot.send_message(
-                    user_id,
-                    f"{header}\n{text}"
-                )
-            elif file_id and media_type:
-                # Медиа с подписью
-                caption_text = f"{header}" + (f"\n{text}" if text else "")
-                await bot.send_message(user_id, caption_text)
-                await resend_media(bot, user_id, media_type, file_id)
-            sent += 1
-            await asyncio.sleep(0.05)
-        except Exception as err:
-            log.warning(f"restore send error: {err}")
-
-    # Подвал
-    await bot.send_message(
-        user_id,
-        f"✅ ─────────────────────\n"
-        f"   Переписка восстановлена\n"
-        f"   Отправлено: <b>{sent}</b> из <b>{len(msgs)}</b>\n"
-        f"─────────────────────",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Восстановить ещё", callback_data="restore_menu")],
-            [InlineKeyboardButton(text="🏠 Главное меню",     callback_data="back_main")],
-        ])
-    )
-
 # ── как это работает ───────────────────────────────────────
 
 @router.callback_query(F.data == "howto")
@@ -752,9 +594,7 @@ async def cb_howto(call: CallbackQuery):
         "✅ Бот ловит удалённые и изменённые в личке.\n\n"
         "<b>── Группы ──</b>\n"
         "Добавь бота в группу как администратора.\n\n"
-        "<b>── Восстановление ──</b>\n"
-        "Кнопка 🔄 в меню — отправит всю сохранённую переписку в ЛС.\n\n"
-        "<b>── Огонёк 🔥 ──</b>\n"
+                "<b>── Огонёк 🔥 ──</b>\n"
         "Заходи в бота каждый день — растёт серия.\n"
         "Пропустил день — серия сгорает!",
         reply_markup=kb_back()
@@ -854,18 +694,62 @@ async def on_business_message(message: Message, bot: Bot):
     if not owner_id or not await is_subscribed(owner_id):
         return
 
-    # ── Одноразовые медиа через has_media_spoiler ──────────────────────────
-    is_once = bool(getattr(message, "has_media_spoiler", False))
+    # ── Способ 1: ты отвечаешь на одноразовое → бот видит его в reply ──────
+    reply = message.reply_to_message
+    if reply:
+        has_photo      = bool(reply.photo)
+        has_video      = bool(reply.video)
+        has_video_note = bool(reply.video_note)
+        has_voice      = bool(reply.voice)
+        has_audio      = bool(reply.audio)
+        has_doc        = bool(reply.document)
+        has_sticker    = bool(reply.sticker)
+        is_once_reply  = bool(getattr(reply, "has_media_spoiler", False))
 
+        if any([has_photo, has_video, has_video_note,
+                has_voice, has_audio, has_doc, has_sticker]):
+            sender    = reply.from_user.full_name if reply.from_user else "Аноним"
+            chat_name = (getattr(reply.chat, "first_name", None) or
+                         getattr(reply.chat, "title", None) or "Собеседник")
+            date_str  = reply.date.strftime("%d.%m.%Y %H:%M") if reply.date else "?"
+            label     = "🔥 Одноразовое" if is_once_reply else "📎 Медиа"
+            try:
+                await bot.send_message(
+                    owner_id,
+                    f"{label} — <b>перехвачено через ответ!</b>\n"
+                    f"💬 От: <b>{sender}</b> ({chat_name})\n"
+                    f"🕐 {date_str}"
+                )
+                if has_photo:
+                    await bot.send_photo(owner_id, reply.photo[-1].file_id,
+                                         caption=f"📸 {'Одноразовое фото' if is_once_reply else 'Фото'}")
+                elif has_video:
+                    await bot.send_video(owner_id, reply.video.file_id,
+                                         caption=f"🎥 {'Одноразовое видео' if is_once_reply else 'Видео'}")
+                elif has_video_note:
+                    await bot.send_video_note(owner_id, reply.video_note.file_id)
+                elif has_voice:
+                    await bot.send_voice(owner_id, reply.voice.file_id)
+                elif has_audio:
+                    await bot.send_audio(owner_id, reply.audio.file_id)
+                elif has_doc:
+                    await bot.send_document(owner_id, reply.document.file_id)
+                elif has_sticker:
+                    await bot.send_sticker(owner_id, reply.sticker.file_id)
+            except Exception as err:
+                log.warning(f"reply intercept failed for {owner_id}: {err}")
+
+    # ── Способ 2: прямой перехват по флагу has_media_spoiler ───────────────
+    is_once = bool(getattr(message, "has_media_spoiler", False))
     if is_once and (message.photo or message.video or message.video_note):
-        sender = message.from_user.full_name if message.from_user else "Аноним"
+        sender    = message.from_user.full_name if message.from_user else "Аноним"
         chat_name = (getattr(message.chat, "first_name", None) or
                      getattr(message.chat, "title", None) or "Собеседник")
-        date_str = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
+        date_str  = datetime.utcnow().strftime("%d.%m.%Y %H:%M")
         try:
             await bot.send_message(
                 owner_id,
-                f"🔥 <b>Одноразовое сообщение перехвачено!</b>\n"
+                f"🔥 <b>Одноразовое перехвачено автоматически!</b>\n"
                 f"💬 От: <b>{sender}</b> ({chat_name})\n"
                 f"🕐 {date_str}"
             )
@@ -878,71 +762,10 @@ async def on_business_message(message: Message, bot: Bot):
             elif message.video_note:
                 await bot.send_video_note(owner_id, message.video_note.file_id)
         except Exception as err:
-            log.warning(f"once-media forward failed for {owner_id}: {err}")
+            log.warning(f"once-media direct failed for {owner_id}: {err}")
 
+    # Кешируем
     await db_cache(message)
-
-@router.business_message()
-async def on_business_reply(message: Message, bot: Bot):
-    """Пользователь ответил на сообщение — проверяем reply_to_message.
-    Именно так перехватываются одноразовые фото/видео:
-    собеседник присылает одноразовое → ты отвечаешь любым сообщением →
-    бот видит оригинал в reply_to_message и пересылает тебе."""
-    owner_id = await db_get_bc_owner(message.business_connection_id)
-    if not owner_id or not await is_subscribed(owner_id):
-        return
-
-    reply = message.reply_to_message
-    if not reply:
-        return
-
-    # Проверяем есть ли в оригинале медиа
-    has_photo      = bool(reply.photo)
-    has_video      = bool(reply.video)
-    has_video_note = bool(reply.video_note)
-    has_voice      = bool(reply.voice)
-    has_audio      = bool(reply.audio)
-    has_doc        = bool(reply.document)
-    has_sticker    = bool(reply.sticker)
-    is_once        = bool(getattr(reply, "has_media_spoiler", False))
-
-    # Если в оригинале нет медиа — не интересно
-    if not any([has_photo, has_video, has_video_note, has_voice,
-                has_audio, has_doc, has_sticker]):
-        return
-
-    sender = reply.from_user.full_name if reply.from_user else "Аноним"
-    chat_name = (getattr(reply.chat, "first_name", None) or
-                 getattr(reply.chat, "title", None) or "Собеседник")
-    date_str = reply.date.strftime("%d.%m.%Y %H:%M") if reply.date else "?"
-
-    label = "🔥 Одноразовое" if is_once else "📎 Медиа из ответа"
-
-    try:
-        await bot.send_message(
-            owner_id,
-            f"{label} — <b>перехвачено через ответ!</b>\n"
-            f"💬 От: <b>{sender}</b> ({chat_name})\n"
-            f"🕐 {date_str}"
-        )
-        if has_photo:
-            await bot.send_photo(owner_id, reply.photo[-1].file_id,
-                                 caption=f"📸 {'Одноразовое фото' if is_once else 'Фото'}")
-        elif has_video:
-            await bot.send_video(owner_id, reply.video.file_id,
-                                 caption=f"🎥 {'Одноразовое видео' if is_once else 'Видео'}")
-        elif has_video_note:
-            await bot.send_video_note(owner_id, reply.video_note.file_id)
-        elif has_voice:
-            await bot.send_voice(owner_id, reply.voice.file_id)
-        elif has_audio:
-            await bot.send_audio(owner_id, reply.audio.file_id)
-        elif has_doc:
-            await bot.send_document(owner_id, reply.document.file_id)
-        elif has_sticker:
-            await bot.send_sticker(owner_id, reply.sticker.file_id)
-    except Exception as err:
-        log.warning(f"reply intercept failed for {owner_id}: {err}")
 
 
 @router.edited_business_message()
