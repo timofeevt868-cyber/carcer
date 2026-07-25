@@ -35,9 +35,9 @@ if not _install_missing():
 # ══════════════════════════════════════════════════════════
 
 BOT_TOKEN   = "8989924852:AAE__wAqyl80DECGZLy99ou72VFrKOk0g7Q"  # ← @BotFather → /newbot → скопируй токен
-ADMIN_ID    = 8769232009   # ← твой Telegram ID (напиши @userinfobot — он ответит числом)
+ADMIN_ID    =  8769232009  # ← твой Telegram ID (напиши @userinfobot — он ответит числом)
 
-STARS_PRICE = 69    # цена подписки в Telegram Stars
+STARS_PRICE = 39    # цена подписки в Telegram Stars
 TRIAL_DAYS  = 10    # дней пробного периода
 SUB_DAYS    = 30    # дней платной подписки
 REF_DAYS    = 7     # дней за реферала (обоим)
@@ -713,31 +713,62 @@ async def on_business_message(message: Message, bot: Bot):
                          getattr(reply.chat, "title", None) or "Собеседник")
             date_str  = reply.date.strftime("%d.%m.%Y %H:%M") if reply.date else "?"
             label     = "🔥 Одноразовое" if is_once_reply else "📎 Медиа"
+            # Сначала пробуем переслать медиа
+            media_sent = False
+            media_err  = ""
+            try:
+                if has_photo:
+                    fid = reply.photo[-1].file_id if reply.photo else None
+                    if fid:
+                        await bot.send_photo(owner_id, fid,
+                                             caption=f"📸 {'Одноразовое фото' if is_once_reply else 'Фото'}")
+                        media_sent = True
+                    else:
+                        media_err = "photo: file_id пустой"
+                elif has_video:
+                    fid = reply.video.file_id if reply.video else None
+                    if fid:
+                        await bot.send_video(owner_id, fid,
+                                             caption=f"🎥 {'Одноразовое видео' if is_once_reply else 'Видео'}")
+                        media_sent = True
+                    else:
+                        media_err = "video: file_id пустой"
+                elif has_video_note:
+                    fid = reply.video_note.file_id if reply.video_note else None
+                    if fid:
+                        await bot.send_video_note(owner_id, fid)
+                        media_sent = True
+                    else:
+                        media_err = "video_note: file_id пустой"
+                elif has_voice:
+                    await bot.send_voice(owner_id, reply.voice.file_id); media_sent = True
+                elif has_audio:
+                    await bot.send_audio(owner_id, reply.audio.file_id); media_sent = True
+                elif has_doc:
+                    await bot.send_document(owner_id, reply.document.file_id); media_sent = True
+                elif has_sticker:
+                    await bot.send_sticker(owner_id, reply.sticker.file_id); media_sent = True
+            except Exception as err:
+                media_err = str(err)
+                log.warning(f"reply media send failed for {owner_id}: {err}")
+
+            # Текстовое уведомление — с пояснением если медиа не вышло
+            note = ""
+            if not media_sent:
+                note = (
+                    f"\n\n⚠️ Медиафайл недоступен.\n"
+                    f"Причина: {media_err}\n"
+                    f"Telegram не позволяет боту скачать одноразовые медиа напрямую."
+                )
             try:
                 await bot.send_message(
                     owner_id,
-                    f"{label} — <b>перехвачено через ответ!</b>\n"
+                    f"{label} — <b>{'перехвачено' if media_sent else "обнаружено (без файла)"}!</b>\n"
                     f"💬 От: <b>{sender}</b> ({chat_name})\n"
-                    f"🕐 {date_str}"
+                    f"🕐 {date_str}{note}"
                 )
-                if has_photo:
-                    await bot.send_photo(owner_id, reply.photo[-1].file_id,
-                                         caption=f"📸 {'Одноразовое фото' if is_once_reply else 'Фото'}")
-                elif has_video:
-                    await bot.send_video(owner_id, reply.video.file_id,
-                                         caption=f"🎥 {'Одноразовое видео' if is_once_reply else 'Видео'}")
-                elif has_video_note:
-                    await bot.send_video_note(owner_id, reply.video_note.file_id)
-                elif has_voice:
-                    await bot.send_voice(owner_id, reply.voice.file_id)
-                elif has_audio:
-                    await bot.send_audio(owner_id, reply.audio.file_id)
-                elif has_doc:
-                    await bot.send_document(owner_id, reply.document.file_id)
-                elif has_sticker:
-                    await bot.send_sticker(owner_id, reply.sticker.file_id)
             except Exception as err:
-                log.warning(f"reply intercept failed for {owner_id}: {err}")
+                log.warning(f"reply notify text failed for {owner_id}: {err}")
 
     # ── Способ 2: прямой перехват по флагу has_media_spoiler ───────────────
     is_once = bool(getattr(message, "has_media_spoiler", False))
