@@ -35,9 +35,9 @@ if not _install_missing():
 # ══════════════════════════════════════════════════════════
 
 BOT_TOKEN   = "8989924852:AAE__wAqyl80DECGZLy99ou72VFrKOk0g7Q"  # ← @BotFather → /newbot → скопируй токен
-ADMIN_ID    =  8769232009  # ← твой Telegram ID (напиши @userinfobot — он ответит числом)
+ADMIN_ID    = 8769232009   # ← твой Telegram ID (напиши @userinfobot — он ответит числом)
 
-STARS_PRICE = 39    # цена подписки в Telegram Stars
+STARS_PRICE = 69    # цена подписки в Telegram Stars
 TRIAL_DAYS  = 10    # дней пробного периода
 SUB_DAYS    = 30    # дней платной подписки
 REF_DAYS    = 7     # дней за реферала (обоим)
