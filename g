@@ -34,7 +34,7 @@ if not _install_missing():
 #  ▼▼▼  НАСТРОЙКИ — ЗАПОЛНИ ЭТИ 2 СТРОКИ  ▼▼▼
 # ══════════════════════════════════════════════════════════
 
-BOT_TOKEN   = "8711347749:AAGnb6uPtsfNbqYrB6fi2Tfovt8R4nQTCuo"  # ← @BotFather → /newbot → скопируй токен
+BOT_TOKEN   = "8989924852:AAE__wAqyl80DECGZLy99ou72VFrKOk0g7Q"  # ← @BotFather → /newbot → скопируй токен
 ADMIN_ID    =  8769232009  # ← твой Telegram ID (напиши @userinfobot — он ответит числом)
 
 STARS_PRICE = 69    # цена подписки в Telegram Stars
